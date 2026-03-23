@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AtomVM HTTP Server (Browser)</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #333; }
+    .badge { display: inline-block; background: #4a90d9; color: white;
+             padding: 4px 10px; border-radius: 4px; font-size: 0.85em; }
+    pre { background: #f4f4f4; padding: 12px; border-radius: 4px; }
+    #api-result { background: #f4f4f4; padding: 12px; border-radius: 4px; min-height: 2em; }
+    #sw-status { color: #888; font-size: 0.9em; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>AtomVM HTTP Server <span class="badge">Browser</span></h1>
+  <p>Service Worker上で動くブラウザ版HTTPサーバーのデモページです。</p>
+
+  <h2>REST API テスト</h2>
+  <button id="api-btn" onclick="fetchStatus()">GET /api/status</button>
+  <pre id="api-result">ボタンを押してAPIを呼び出す...</pre>
+  <p id="sw-status">Service Worker: 登録中...</p>
+
+  <script>
+    var apiUrl = location.origin + '/api/status';
+    document.getElementById('api-btn').textContent = 'GET ' + apiUrl;
+
+    async function fetchStatus() {
+      const el = document.getElementById('api-result');
+      try {
+        const res = await fetch(apiUrl);
+        const data = await res.json();
+        el.textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        el.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(function(reg) {
+        var statusEl = document.getElementById('sw-status');
+
+        function waitForActive(worker) {
+          return new Promise(function(resolve) {
+            if (worker.state === 'activated') { resolve(); return; }
+            worker.addEventListener('statechange', function() {
+              if (worker.state === 'activated') resolve();
+            });
+          });
+        }
+
+        if (reg.active && navigator.serviceWorker.controller) {
+          statusEl.textContent = 'Service Worker: 有効';
+        } else {
+          var installing = reg.installing || reg.waiting || reg.active;
+          statusEl.textContent = 'Service Worker: インストール中...';
+          if (installing) {
+            waitForActive(installing).then(function() {
+              if (navigator.serviceWorker.controller) {
+                statusEl.textContent = 'Service Worker: 有効';
+              } else {
+                statusEl.textContent = 'Service Worker: 有効（リロードします）';
+                window.location.reload();
+              }
+            });
+          }
+        }
+      }).catch(function(err) {
+        document.getElementById('sw-status').textContent =
+          'Service Worker: 登録失敗 — ' + err.message;
+      });
+    } else {
+      document.getElementById('sw-status').textContent =
+        'Service Worker: このブラウザでは利用できません';
+    }
+  </script>
+</body>
+</html>
