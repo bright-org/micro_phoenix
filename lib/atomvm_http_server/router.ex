@@ -6,14 +6,18 @@ defmodule AtomvmHttpServer.Router do
     {:ok, 200, "application/json", body}
   end
 
-  def route(%Request{method: :get, path: path}) do
-    case AtomvmHttpServer.Static.get(path) do
-      {:ok, content_type, body} -> {:ok, 200, content_type, body}
-      {:error, :not_found} -> {:error, 404}
+  def route(%Request{method: :get} = req) do
+    case AtomvmHttpServer.Controller.handle_get(req) do
+      {:ok, status, content_type, body} ->
+        {:ok, status, content_type, body}
+
+      :not_found ->
+        AtomvmHttpServer.Static.get_error_page(404)
+
     end
   end
 
   def route(_request) do
-    {:error, 405}
+    AtomvmHttpServer.Static.get_error_page(405)
   end
 end
