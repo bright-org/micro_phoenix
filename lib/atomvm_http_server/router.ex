@@ -7,7 +7,7 @@ defmodule AtomvmHttpServer.Router do
   end
 
   def route(%Request{method: :get} = req) do
-    case AtomvmHttpServer.Controller.handle_get(req) do
+    case get(req) do
       {:ok, status, content_type, body} ->
         {:ok, status, content_type, body}
 
@@ -20,4 +20,10 @@ defmodule AtomvmHttpServer.Router do
   def route(_request) do
     AtomvmHttpServer.Static.get_error_page(405)
   end
+
+  def get(conn) when conn.path in ["/", "/index.html"] do
+    AtomvmHttpServerWeb.Controller.index(conn)
+  end
+
+  def get(_conn), do: :not_found
 end

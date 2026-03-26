@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer.Controller do
+defmodule AtomvmHttpServerWeb.Controller do
   @moduledoc false
 
   @index_html """
@@ -37,12 +37,6 @@ defmodule AtomvmHttpServer.Controller do
   </body>
   </html>
   """
-
-  def handle_get(conn) when conn.path in ["/", "/index.html"] do
-    index(conn)
-  end
-
-  def handle_get(_conn), do: :not_found
 
   def index(conn), do: render(conn, :index)
 
