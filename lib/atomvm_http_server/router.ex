@@ -25,5 +25,9 @@ defmodule AtomvmHttpServer.Router do
     AtomvmHttpServerWeb.Controller.index(conn)
   end
 
+  def get(conn) when conn.path in ["/index2.html"] do
+    AtomvmHttpServerWeb.Controller.index2(conn)
+  end
+
   def get(_conn), do: :not_found
 end
