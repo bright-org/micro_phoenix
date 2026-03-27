@@ -25,6 +25,7 @@ defmodule AtomvmHttpServer.MixProject do
 
   defp deps do
     [
+      {:micro_scaffold_example, git: "git@github.com:bright-org/micro_scaffold_example.git"},
       {:exatomvm, git: "https://github.com/atomvm/ExAtomVM/"},
       {:ecto_sqlite3, "~> 0.21"}
     ]

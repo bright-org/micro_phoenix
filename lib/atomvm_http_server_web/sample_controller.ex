@@ -1,5 +1,7 @@
-defmodule AtomvmHttpServerWeb.Controller do
+defmodule AtomvmHttpServerWeb.SampleController do
   @moduledoc false
+
+  alias MicroScaffoldExample.Controller
 
   @index_html """
   <!DOCTYPE html>
@@ -63,43 +65,10 @@ defmodule AtomvmHttpServerWeb.Controller do
   </html>
   """
 
-  def index(conn), do: render(conn, :index)
+  def index(conn), do: Controller.render(conn, @index_html)
+
   def index2(conn) do
     items = AtomvmHttpServer.Items.list_items() |> Enum.map(fn item -> "<li>#{item.name}</li>" end)
-    render(conn, :index2, %{items: items})
+    Controller.render(conn, @index2_html, %{items: items})
   end
-
-  def render(_conn, template, assigns \\ %{}) do
-    case template do
-      :index -> {:ok, 200, "text/html", render_template(@index_html, assigns)}
-      :index2 -> {:ok, 200, "text/html", render_template(@index2_html, assigns)}
-      _ -> {:error, 404}
-    end
-  end
-
-  defp render_template(template, assigns) do
-    Regex.replace(~r/<%=\s*@([a-zA-Z0-9_]+)\s*%>/, template, fn _, var_name ->
-      atom_key =
-        try do
-          :erlang.binary_to_existing_atom(var_name, :utf8)
-        rescue
-          ArgumentError -> nil
-        end
-
-      value =
-        cond do
-          atom_key != nil and Map.has_key?(assigns, atom_key) -> Map.get(assigns, atom_key)
-          Map.has_key?(assigns, var_name) -> Map.get(assigns, var_name)
-          true -> nil
-        end
-
-      case value do
-        nil -> ""
-        v when is_list(v) -> Enum.join(v, "")
-        v when is_binary(v) -> v
-        v -> to_string(v)
-      end
-    end)
-  end
-
 end
