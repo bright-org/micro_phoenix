@@ -7,7 +7,7 @@ defmodule AtomvmHttpServer.Router do
   end
 
   def route(%Request{method: :get} = req) do
-    case get(req) do
+    case MicroScaffoldExampleWeb.Controller.get(req) do
       {:ok, status, content_type, body} ->
         {:ok, status, content_type, body}
 
@@ -21,13 +21,6 @@ defmodule AtomvmHttpServer.Router do
     AtomvmHttpServer.Static.get_error_page(405)
   end
 
-  def get(conn) when conn.path in ["/", "/index.html"] do
-    AtomvmHttpServerWeb.SampleController.index(conn)
-  end
 
-  def get(conn) when conn.path in ["/index2.html"] do
-    AtomvmHttpServerWeb.SampleController.index2(conn)
-  end
 
-  def get(_conn), do: :not_found
 end

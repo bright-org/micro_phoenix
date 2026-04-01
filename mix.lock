@@ -8,7 +8,7 @@
   "elixir_make": {:hex, :elixir_make, "0.9.0", "6484b3cd8c0cee58f09f05ecaf1a140a8c97670671a6a0e7ab4dc326c3109726", [:mix], [], "hexpm", "db23d4fd8b757462ad02f8aa73431a426fe6671c80b200d9710caf3d1dd0ffdb"},
   "exatomvm": {:git, "https://github.com/atomvm/ExAtomVM/", "4e615cd46d1568337a2a21c56ea79776fef85612", []},
   "exqlite": {:hex, :exqlite, "0.35.0", "90741471945db42b66cd8ca3149af317f00c22c769cc6b06e8b0a08c5924aae5", [:make, :mix], [{:cc_precompiler, "~> 0.1", [hex: :cc_precompiler, repo: "hexpm", optional: false]}, {:db_connection, "~> 2.1", [hex: :db_connection, repo: "hexpm", optional: false]}, {:elixir_make, "~> 0.8", [hex: :elixir_make, repo: "hexpm", optional: false]}, {:table, "~> 0.1.0", [hex: :table, repo: "hexpm", optional: true]}], "hexpm", "a009e303767a28443e546ac8aab2539429f605e9acdc38bd43f3b13f1568bca9"},
-  "micro_scaffold_example": {:git, "git@github.com:bright-org/micro_scaffold_example.git", "a776d24630735c123dccc206fc522d45fb5b2cae", []},
+  "micro_scaffold_example": {:git, "git@github.com:bright-org/micro_scaffold_example.git", "d074ad8fa8589c800f4f364223dbe4a59a5c8728", []},
   "telemetry": {:hex, :telemetry, "1.4.1", "ab6de178e2b29b58e8256b92b382ea3f590a47152ca3651ea857a6cae05ac423", [:rebar3], [], "hexpm", "2172e05a27531d3d31dd9782841065c50dd5c3c7699d95266b2edd54c2dafa1c"},
   "uf2tool": {:hex, :uf2tool, "1.1.0", "7091931234ca5a256b66ea691983867d51229798622d083f85c1ad779798a734", [:rebar3], [], "hexpm", "1a7e5ca7ef3d19c7a0b0acf3db804b3188e0980884acffa13fd57d733507b73d"},
 }
