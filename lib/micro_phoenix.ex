@@ -23,10 +23,12 @@ defmodule MicroPhoenix do
   defp handle_client(socket) do
     case :gen_tcp.recv(socket, 0) do
       {:ok, data} ->
+        route_fn = MicroPhoenix.Registry.get_router()
+
         response =
           data
           |> MicroPhoenix.Request.parse()
-          |> MicroScaffoldExampleWeb.Router.route()
+          |> route_fn.()
           |> MicroPhoenix.Response.build()
 
         :gen_tcp.send(socket, response)
