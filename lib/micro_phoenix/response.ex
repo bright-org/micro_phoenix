@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer.Response do
+defmodule MicroPhoenix.Response do
   def build({:ok, status, content_type, body}) do
     http_response(status, content_type, body)
   end

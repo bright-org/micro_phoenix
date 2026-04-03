@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer.Request do
+defmodule MicroPhoenix.Request do
   defstruct method: :get, path: "/", headers: %{}
 
   def parse(data) when is_binary(data) do

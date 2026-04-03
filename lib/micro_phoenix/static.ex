@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer.Static do
+defmodule MicroPhoenix.Static do
   # 404エラーページ
   def get_error_page(404) do
     {:error, 404}
