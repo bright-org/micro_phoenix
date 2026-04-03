@@ -1,20 +1,23 @@
-defmodule AtomvmHttpServer.MixProject do
+defmodule MicroPhoenix.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :atomvm_http_server,
+      app: :micro_phoenix,
       version: "0.1.0",
       elixir: "~> 1.13",
       deps: deps(),
       atomvm: [
-        start: AtomvmHttpServer
+        start: MicroPhoenix
       ]
     ]
   end
 
   def application do
-    [extra_applications: []]
+    [
+      extra_applications: [:logger],
+      mod: {MicroPhoenix.Application, []}
+    ]
   end
 
   defp deps do

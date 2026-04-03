@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer do
+defmodule MicroPhoenix do
   @port 8080
 
   def start do
@@ -23,11 +23,13 @@ defmodule AtomvmHttpServer do
   defp handle_client(socket) do
     case :gen_tcp.recv(socket, 0) do
       {:ok, data} ->
+        route_fn = MicroPhoenix.Registry.get_router()
+
         response =
           data
-          |> AtomvmHttpServer.Request.parse()
-          |> AtomvmHttpServer.Router.route()
-          |> AtomvmHttpServer.Response.build()
+          |> MicroPhoenix.Request.parse()
+          |> route_fn.()
+          |> MicroPhoenix.Response.build()
 
         :gen_tcp.send(socket, response)
         :gen_tcp.close(socket)
