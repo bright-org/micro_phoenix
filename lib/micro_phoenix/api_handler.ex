@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer.ApiHandler do
+defmodule MicroPhoenix.ApiHandler do
   @behaviour :httpd_api_handler
 
   @impl :httpd_api_handler

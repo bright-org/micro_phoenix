@@ -1,4 +1,4 @@
-defmodule AtomvmHttpServer do
+defmodule MicroPhoenix do
   @port 8080
 
   def start do
@@ -25,9 +25,9 @@ defmodule AtomvmHttpServer do
       {:ok, data} ->
         response =
           data
-          |> AtomvmHttpServer.Request.parse()
-          |> AtomvmHttpServer.Router.route()
-          |> AtomvmHttpServer.Response.build()
+          |> MicroPhoenix.Request.parse()
+          |> MicroScaffoldExampleWeb.Router.route()
+          |> MicroPhoenix.Response.build()
 
         :gen_tcp.send(socket, response)
         :gen_tcp.close(socket)
