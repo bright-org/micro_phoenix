@@ -1,31 +1,22 @@
 defmodule Template do
-
   def render(_conn, html, assigns \\ %{}) when is_binary(html) do
     {:ok, 200, "text/html", render_template(html, assigns)}
   end
 
   defp render_template(template, assigns) do
-    Regex.replace(~r/<%=\s*@([a-zA-Z0-9_]+)\s*%>/, template, fn _, var_name ->
-      atom_key =
-        try do
-          :erlang.binary_to_existing_atom(var_name, :utf8)
-        rescue
-          ArgumentError -> nil
-        end
-
-      value =
-        cond do
-          atom_key != nil and Map.has_key?(assigns, atom_key) -> Map.get(assigns, atom_key)
-          Map.has_key?(assigns, var_name) -> Map.get(assigns, var_name)
-          true -> nil
-        end
-
-      case value do
-        nil -> ""
-        v when is_list(v) -> Enum.join(v, "")
-        v when is_binary(v) -> v
-        v -> to_string(v)
-      end
+    Enum.reduce(assigns, template, fn {key, value}, acc ->
+      placeholder = ["<%= @", normalize_key(key), " %>"] |> IO.iodata_to_binary()
+      replacement = normalize_value(value)
+      :binary.replace(acc, placeholder, replacement, [:global])
     end)
   end
+
+  defp normalize_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp normalize_key(key) when is_binary(key), do: key
+  defp normalize_key(key), do: to_string(key)
+
+  defp normalize_value(nil), do: ""
+  defp normalize_value(value) when is_binary(value), do: value
+  defp normalize_value(value) when is_list(value), do: IO.iodata_to_binary(value)
+  defp normalize_value(value), do: to_string(value)
 end
