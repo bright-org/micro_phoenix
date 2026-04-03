@@ -2,15 +2,14 @@ defmodule MicroPhoenix do
   @port 8080
 
   def start do
-    {:ok, sock} =
-      :gen_tcp.listen(@port, [:binary, {:active, false}, {:reuseaddr, true}, {:packet, :raw}])
+    {:ok, sock} = listen_socket()
 
     IO.puts("AtomVM HTTP Server listening on http://localhost:#{@port}/")
     accept_loop(sock)
   end
 
   defp accept_loop(listen_sock) do
-    case :gen_tcp.accept(listen_sock) do
+    case :socket.accept(listen_sock) do
       {:ok, client} ->
         spawn(fn -> handle_client(client) end)
         accept_loop(listen_sock)
@@ -21,7 +20,7 @@ defmodule MicroPhoenix do
   end
 
   defp handle_client(socket) do
-    case :gen_tcp.recv(socket, 0) do
+    case :socket.recv(socket, 0) do
       {:ok, data} ->
         route_fn = MicroPhoenix.Registry.get_router()
 
@@ -31,11 +30,20 @@ defmodule MicroPhoenix do
           |> route_fn.()
           |> MicroPhoenix.Response.build()
 
-        :gen_tcp.send(socket, response)
-        :gen_tcp.close(socket)
+        :ok = :socket.send(socket, response)
+        :ok = :socket.close(socket)
 
       {:error, _} ->
-        :gen_tcp.close(socket)
+        :ok = :socket.close(socket)
+    end
+  end
+
+  defp listen_socket do
+    with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
+         :ok <- :socket.setopt(socket, :socket, :reuseaddr, true),
+         :ok <- :socket.bind(socket, %{family: :inet, port: @port, addr: :any}),
+         :ok <- :socket.listen(socket) do
+      {:ok, socket}
     end
   end
 end
