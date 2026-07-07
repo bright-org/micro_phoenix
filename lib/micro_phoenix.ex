@@ -21,7 +21,12 @@ defmodule MicroPhoenix do
     mark(@listen_start)
 
     try do
-      case :gen_tcp.listen(@port, [:binary, {:active, false}, {:reuseaddr, true}, {:packet, :raw} | @listen_options]) do
+      case :gen_tcp.listen(@port, [
+             :binary,
+             {:active, false},
+             {:reuseaddr, true},
+             {:packet, :raw} | @listen_options
+           ]) do
         {:ok, sock} ->
           mark(@listen_ok)
           accept_loop(sock)
@@ -59,7 +64,13 @@ defmodule MicroPhoenix do
           mark(@recv_ok)
           mark(@send_start)
 
-          case :gen_tcp.send(socket, response_for(data)) do
+          response =
+            data
+            |> MicroPhoenix.Request.parse()
+            |> route()
+            |> MicroPhoenix.Response.build()
+
+          case :gen_tcp.send(socket, response) do
             :ok ->
               mark(@send_ok)
 
@@ -84,6 +95,19 @@ defmodule MicroPhoenix do
     end
   end
 
+  defp route(request) do
+    case MicroPhoenix.Registry.fetch_router() do
+      {:ok, route_fn} when is_function(route_fn, 1) ->
+        route_fn.(request)
+
+      {:ok, {module, function}} ->
+        apply(module, function, [request])
+
+      :error ->
+        {:error, 404}
+    end
+  end
+
   defp close_socket(socket) do
     case :gen_tcp.close(socket) do
       :ok ->
@@ -94,37 +118,9 @@ defmodule MicroPhoenix do
     end
   end
 
-  defp response_for(<<"GET /api/status", _rest::binary>>) do
-    body = ~s({"status":"ok","vm":"AtomVM","app":"micro_phoenix"})
-    response("HTTP/1.1 200 OK", "application/json", body)
-  end
-
-  defp response_for(<<"GET / ", _rest::binary>>) do
-    body = """
-    <!DOCTYPE html>
-    <html><body><h1>MicroPhoenix on AtomVM</h1><p>OK</p></body></html>
-    """
-
-    response("HTTP/1.1 200 OK", "text/html", body)
-  end
-
-  defp response_for(_request) do
-    response("HTTP/1.1 404 Not Found", "text/plain", "404 Not Found")
-  end
-
-  defp response(status_line, content_type, body) do
-    status_line <>
-      "\r\nContent-Type: " <>
-      content_type <>
-      "; charset=utf-8\r\nContent-Length: " <>
-      :erlang.integer_to_binary(byte_size(body)) <>
-      "\r\nConnection: close\r\n\r\n" <>
-      body
-  end
-
   defp mark(code) do
     try do
-      :fpga_net.mark(code)
+      apply(:fpga_net, :mark, [code])
     rescue
       _ -> :ok
     catch
