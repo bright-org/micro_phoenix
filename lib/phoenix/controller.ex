@@ -1,0 +1,158 @@
+defmodule Phoenix.Controller do
+  @moduledoc false
+
+  defmacro __using__(opts) do
+    formats = Keyword.get(opts, :formats, [:html])
+
+    quote bind_quoted: [formats: formats] do
+      import Phoenix.Controller
+      @phoenix_controller_formats formats
+    end
+  end
+
+  def accepts(conn, _accepted) do
+    Plug.Conn.put_resp_content_type(conn, "text/html")
+  end
+
+  def fetch_session(conn, _opts \\ []) do
+    conn
+  end
+
+  def fetch_live_flash(conn, _opts \\ []) do
+    Plug.Conn.assign(conn, :flash, %{})
+  end
+
+  def put_root_layout(conn, opts) do
+    Plug.Conn.put_private(conn, :phoenix_root_layout, Keyword.fetch!(opts, :html))
+  end
+
+  def put_layout(conn, opts) do
+    Plug.Conn.put_private(conn, :phoenix_layout, Keyword.fetch!(opts, :html))
+  end
+
+  def protect_from_forgery(conn, _opts \\ []) do
+    Plug.Conn.assign(conn, :csrf_token, Plug.CSRFProtection.get_csrf_token())
+  end
+
+  def put_secure_browser_headers(conn, _opts \\ []) do
+    conn
+    |> Plug.Conn.put_resp_header("x-frame-options", "SAMEORIGIN")
+    |> Plug.Conn.put_resp_header("x-content-type-options", "nosniff")
+  end
+
+  def render(conn, template, assigns \\ [])
+
+  def render(conn, template, assigns) when is_atom(template) do
+    conn = prepare_assigns(conn, assigns)
+    controller = conn.private[:phoenix_controller] || infer_controller(conn)
+    view = view_module(conn, controller)
+    html = apply(view, template, [Map.put(conn.assigns, :conn, conn)])
+    html = render_layout(conn, html)
+    status = Map.get(conn, :status, 200)
+    conn |> Plug.Conn.put_resp_content_type("text/html") |> Plug.Conn.send_resp(status, html)
+  end
+
+  def render(conn, template, assigns) when is_binary(template) do
+    render(conn, String.to_existing_atom(template), assigns)
+  end
+
+  def render(conn, %{format: format} = template, assigns) do
+    render(conn, template_to_atom(template, format), assigns)
+  end
+
+  def render(conn, %{}, assigns), do: render(conn, :show, assigns)
+
+  def html(conn, body) when is_binary(body) do
+    status = Map.get(conn, :status, 200)
+    conn |> Plug.Conn.put_resp_content_type("text/html") |> Plug.Conn.send_resp(status, body)
+  end
+
+  def json(conn, data) do
+    body = Phoenix.json_library().encode!(data)
+    status = Map.get(conn, :status, 200)
+    conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(status, body)
+  end
+
+  def redirect(conn, opts) do
+    to = Keyword.fetch!(opts, :to)
+    conn |> Plug.Conn.put_resp_header("location", to) |> Plug.Conn.send_resp(302, "") |> Plug.Conn.halt()
+  end
+
+  def put_flash(conn, kind, message) do
+    flash = Map.put(conn.assigns[:flash] || %{}, kind, message)
+    Plug.Conn.assign(conn, :flash, flash)
+  end
+
+  def put_view(conn, module) do
+    Plug.Conn.put_private(conn, :phoenix_view, module)
+  end
+
+  def put_status(conn, status), do: %{conn | status: status}
+
+  def get_csrf_token, do: Plug.CSRFProtection.get_csrf_token()
+
+  def view_module(conn, controller \\ nil) do
+    conn.private[:phoenix_view] || default_view_module(controller || conn.private[:phoenix_controller])
+  end
+
+  def view_template(conn, template \\ nil)
+  def view_template(conn, nil), do: conn.private[:phoenix_template]
+  def view_template(_conn, template), do: template
+
+  def status_message_from_template("404.html"), do: "Not Found"
+  def status_message_from_template("500.html"), do: "Internal Server Error"
+  def status_message_from_template(template), do: template
+
+  defp prepare_assigns(conn, assigns) do
+    merged =
+      assigns
+      |> Enum.into(%{})
+      |> Map.merge(conn.assigns)
+      |> Map.put_new(:flash, conn.assigns[:flash] || %{})
+
+    %{conn | assigns: merged}
+  end
+
+  defp infer_controller(conn) do
+    conn.private[:phoenix_controller]
+  end
+
+  defp default_view_module(nil), do: nil
+
+  defp default_view_module(controller) do
+    parts = Module.split(controller)
+    base = parts |> List.last() |> String.replace_suffix("Controller", "HTML")
+    Module.concat(Enum.drop(parts, -1) ++ [base])
+  end
+
+  defp render_layout(conn, inner) do
+    case conn.private[:phoenix_root_layout] do
+      {layout_mod, layout_tpl} ->
+        layout_mod = resolve_layout_module(layout_mod)
+
+        result = apply(layout_mod, layout_tpl, [%{inner_content: inner, flash: %{}}])
+
+        case result do
+          {:safe, html} -> html
+          html when is_binary(html) -> html
+          _ -> inner
+        end
+
+      _ ->
+        inner
+    end
+  end
+
+  defp resolve_layout_module({:__aliases__, _, parts}), do: Module.concat(parts)
+  defp resolve_layout_module(mod) when is_atom(mod), do: mod
+
+  defp template_to_atom(%{root: root, path: path}, _format) do
+    path
+    |> String.trim_leading("/")
+    |> String.replace("/", "_")
+    |> then(&String.replace_suffix(root, "", &1))
+    |> String.to_atom()
+  rescue
+    _ -> :show
+  end
+end
