@@ -62,10 +62,14 @@ defmodule Phoenix.Endpoint.Supervisor do
       |> Keyword.merge(opts)
 
     port = config |> Keyword.get(:http, []) |> Keyword.get(:port, 8080)
+    server? = Keyword.get(config, :server, true)
 
-    children = [
-      {Phoenix.Endpoint.Server, plug: {endpoint, []}, port: port}
-    ]
+    children =
+      if server? do
+        [{Phoenix.Endpoint.Server, plug: {endpoint, []}, port: port}]
+      else
+        []
+      end
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -107,14 +111,33 @@ defmodule Phoenix.Endpoint.Server do
   end
 
   defp serve(socket, endpoint, endpoint_opts) do
-    with {:ok, data} <- :gen_tcp.recv(socket, 0),
-         {:ok, conn} <- build_conn(data),
-         conn when is_map(conn) <- endpoint.call(conn, endpoint_opts),
-         response <- encode_response(conn) do
-      :gen_tcp.send(socket, response)
+    try do
+      with {:ok, data} <- :gen_tcp.recv(socket, 0),
+           {:ok, conn} <- build_conn(data),
+           conn when is_map(conn) <- endpoint.call(conn, endpoint_opts),
+           response <- encode_response(conn) do
+        :gen_tcp.send(socket, response)
+      else
+        _ -> :gen_tcp.send(socket, encode_raw(500, "Internal Server Error"))
+      end
+    rescue
+      e ->
+        IO.puts(:stderr, Exception.format(:error, e, __STACKTRACE__))
+        :gen_tcp.send(socket, encode_raw(500, "Internal Server Error"))
+    after
+      :gen_tcp.close(socket)
     end
+  end
 
-    :gen_tcp.close(socket)
+  defp encode_raw(status, body) do
+    [
+      "HTTP/1.1 #{status} #{status_message(status)}",
+      "content-type: text/plain",
+      "content-length: #{byte_size(body)}",
+      "",
+      body
+    ]
+    |> Enum.join("\r\n")
   end
 
   defp build_conn(data) do
@@ -123,21 +146,23 @@ defmodule Phoenix.Endpoint.Server do
         [request_line | headers] = String.split(header_part, "\r\n")
         [method, target, _version] = String.split(request_line, " ")
         {path, query} = split_target(target)
-        method = method |> String.downcase() |> String.to_existing_atom()
+        method = method |> String.upcase()
         req_headers = parse_headers(headers)
+        body_params = parse_body_params(req_headers, body)
 
         conn = %Plug.Conn{
+          adapter: {Phoenix.Endpoint.GenTCPAdapter, %Phoenix.Endpoint.GenTCPAdapter{}},
           method: method,
           request_path: path,
           path_info: String.split(path, "/", trim: true),
           query_string: query,
           req_headers: req_headers,
-          body_params: parse_body_params(req_headers, body),
+          body_params: body_params,
+          params: body_params,
           scheme: :http,
           host: "localhost",
-          port: 80,
-          remote_ip: {127, 0, 0, 1},
-          params: %{}
+          port: 4000,
+          remote_ip: {127, 0, 0, 1}
         }
 
         {:ok, conn}
@@ -174,20 +199,68 @@ defmodule Phoenix.Endpoint.Server do
       end)
 
     if String.starts_with?(content_type, "application/x-www-form-urlencoded") do
-      URI.decode_query(body)
+      body
+      |> URI.decode_query()
+      |> nest_params()
     else
       %{}
     end
   end
 
-  defp encode_response(%Plug.Conn{status: status, resp_body: body, resp_headers: headers}) do
-    body = body || ""
-    headers = [{"content-length", Integer.to_string(byte_size(body))} | headers]
+  # Convert flat "post[title]" keys into %{"post" => %{"title" => ...}}.
+  defp nest_params(params) when is_map(params) do
+    Enum.reduce(params, %{}, fn {key, value}, acc ->
+      put_nested(acc, parse_key_path(key), value)
+    end)
+  end
+
+  defp parse_key_path(key) when is_binary(key) do
+    case Regex.run(~r/^([^\[]+)((?:\[[^\]]*\])*)$/, key) do
+      [_, head, rest] ->
+        brackets =
+          Regex.scan(~r/\[([^\]]*)\]/, rest)
+          |> Enum.map(fn [_, part] -> part end)
+
+        [head | brackets]
+
+      _ ->
+        [key]
+    end
+  end
+
+  defp put_nested(map, [key], value) when is_map(map) do
+    Map.put(map, key, value)
+  end
+
+  defp put_nested(map, [key | rest], value) when is_map(map) do
+    child = Map.get(map, key, %{})
+    child = if is_map(child), do: child, else: %{}
+    Map.put(map, key, put_nested(child, rest, value))
+  end
+
+  defp encode_response(%Plug.Conn{} = conn) do
+    {status, headers, body} = response_parts(conn)
+    body = if is_binary(body), do: body, else: IO.iodata_to_binary(body || "")
+    headers = put_content_length(headers, body)
     header_lines = Enum.map(headers, fn {k, v} -> "#{k}: #{v}" end)
 
     ["HTTP/1.1 #{status} #{status_message(status)}", header_lines, "", body]
     |> List.flatten()
     |> Enum.join("\r\n")
+  end
+
+  defp response_parts(%Plug.Conn{adapter: {_mod, %{status: status, headers: headers, body: body}}})
+       when not is_nil(status) do
+    {status, headers, body}
+  end
+
+  defp response_parts(%Plug.Conn{status: status, resp_headers: headers, resp_body: body}) do
+    {status || 200, headers, body || ""}
+  end
+
+  defp put_content_length(headers, body) do
+    headers = Enum.reject(headers, fn {k, _} -> String.downcase(k) == "content-length" end)
+    [{"content-length", Integer.to_string(byte_size(body))} | headers]
   end
 
   defp status_message(200), do: "OK"

@@ -137,7 +137,7 @@ defmodule Phoenix.Router do
 
   defmacro __before_compile__(env) do
     pipelines = Module.get_attribute(env.module, :phoenix_pipelines) || %{}
-    routes = Module.get_attribute(env.module, :phoenix_routes) || [] |> Enum.reverse()
+    routes = Enum.reverse(Module.get_attribute(env.module, :phoenix_routes) || [])
 
     quote do
       def __phoenix_pipelines__, do: unquote(Macro.escape(pipelines))
@@ -199,7 +199,11 @@ defmodule Phoenix.Router do
   end
 
   defp match_route(method, path, routes) do
-    method = method |> to_string() |> String.downcase() |> String.to_existing_atom()
+    method =
+      method
+      |> to_string()
+      |> String.downcase()
+      |> String.to_existing_atom()
 
     Enum.find_value(routes, :error, fn
       {:forward, pattern, plug, _action, _alias, pipeline} ->
@@ -216,6 +220,9 @@ defmodule Phoenix.Router do
           :error ->
             false
         end
+
+      _other ->
+        false
     end)
   end
 

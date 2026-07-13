@@ -27,6 +27,9 @@ defmodule MicroPhoenix.MixProject do
       {:plug_crypto, "~> 2.0"},
       {:telemetry, "~> 1.0"},
       {:jason, "~> 1.2"},
+      # AtomVM-oriented fork (app name remains :phoenix_html)
+      {:phoenix_html,
+       git: "https://github.com/bright-org/micro_phoenix_html.git", branch: "main"},
       {:exatomvm, git: "https://github.com/atomvm/ExAtomVM/"}
     ]
   end

@@ -47,9 +47,12 @@ defmodule Phoenix.Controller do
     controller = conn.private[:phoenix_controller] || infer_controller(conn)
     view = view_module(conn, controller)
     html = apply(view, template, [Map.put(conn.assigns, :conn, conn)])
-    html = render_layout(conn, html)
-    status = Map.get(conn, :status, 200)
-    conn |> Plug.Conn.put_resp_content_type("text/html") |> Plug.Conn.send_resp(status, html)
+    html = render_layout(conn, html) |> to_resp_body()
+    status = conn.status || 200
+
+    conn
+    |> Plug.Conn.put_resp_content_type("text/html")
+    |> Plug.Conn.send_resp(status, html)
   end
 
   def render(conn, template, assigns) when is_binary(template) do
@@ -63,13 +66,13 @@ defmodule Phoenix.Controller do
   def render(conn, %{}, assigns), do: render(conn, :show, assigns)
 
   def html(conn, body) when is_binary(body) do
-    status = Map.get(conn, :status, 200)
+    status = conn.status || 200
     conn |> Plug.Conn.put_resp_content_type("text/html") |> Plug.Conn.send_resp(status, body)
   end
 
   def json(conn, data) do
     body = Phoenix.json_library().encode!(data)
-    status = Map.get(conn, :status, 200)
+    status = conn.status || 200
     conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(status, body)
   end
 
@@ -129,14 +132,11 @@ defmodule Phoenix.Controller do
     case conn.private[:phoenix_root_layout] do
       {layout_mod, layout_tpl} ->
         layout_mod = resolve_layout_module(layout_mod)
+        flash = conn.assigns[:flash] || %{}
 
-        result = apply(layout_mod, layout_tpl, [%{inner_content: inner, flash: %{}}])
-
-        case result do
-          {:safe, html} -> html
-          html when is_binary(html) -> html
-          _ -> inner
-        end
+        apply(layout_mod, layout_tpl, [
+          %{inner_content: inner, flash: flash, conn: conn}
+        ])
 
       _ ->
         inner
@@ -145,6 +145,44 @@ defmodule Phoenix.Controller do
 
   defp resolve_layout_module({:__aliases__, _, parts}), do: Module.concat(parts)
   defp resolve_layout_module(mod) when is_atom(mod), do: mod
+
+  defp to_resp_body({:safe, html}), do: flatten_iodata(html)
+  defp to_resp_body(html) when is_binary(html), do: html
+  defp to_resp_body(html) when is_list(html), do: flatten_iodata(html)
+
+  defp to_resp_body(other) do
+    other
+    |> Phoenix.HTML.Safe.to_iodata()
+    |> flatten_iodata()
+  rescue
+    _ -> to_string(other)
+  end
+
+  defp flatten_iodata(data) do
+    data
+    |> do_flatten([])
+    |> Enum.reverse()
+    |> IO.iodata_to_binary()
+  end
+
+  # Walk iodata recursively. Prefer [h|t] over Enum.reduce so improper
+  # lists from Phoenix.HTML (e.g. [bin | "&#39;"]) are handled.
+  defp do_flatten({:safe, data}, acc), do: do_flatten(data, acc)
+  defp do_flatten([], acc), do: acc
+  defp do_flatten([head | tail], acc), do: do_flatten(tail, do_flatten(head, acc))
+  defp do_flatten(bin, acc) when is_binary(bin), do: [bin | acc]
+  defp do_flatten(int, acc) when is_integer(int) and int >= 0 and int <= 255, do: [int | acc]
+
+  defp do_flatten(other, acc) do
+    iodata =
+      try do
+        Phoenix.HTML.Safe.to_iodata(other)
+      rescue
+        _ -> to_string(other)
+      end
+
+    do_flatten(iodata, acc)
+  end
 
   defp template_to_atom(%{root: root, path: path}, _format) do
     path
