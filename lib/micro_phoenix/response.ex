@@ -13,11 +13,11 @@ defmodule MicroPhoenix.Response do
 
   defp http_response(status, content_type, body) do
     status_line = status_line(status)
-    byte_size = byte_size(body)
+    content_length = :erlang.integer_to_binary(byte_size(body))
 
-    "#{status_line}\r\n" <>
-      "Content-Type: #{content_type}; charset=utf-8\r\n" <>
-      "Content-Length: #{byte_size}\r\n" <>
+    status_line <> "\r\n" <>
+      "Content-Type: " <> content_type <> "; charset=utf-8\r\n" <>
+      "Content-Length: " <> content_length <> "\r\n" <>
       "Connection: close\r\n" <>
       "\r\n" <>
       body
@@ -26,5 +26,5 @@ defmodule MicroPhoenix.Response do
   defp status_line(200), do: "HTTP/1.1 200 OK"
   defp status_line(404), do: "HTTP/1.1 404 Not Found"
   defp status_line(405), do: "HTTP/1.1 405 Method Not Allowed"
-  defp status_line(code), do: "HTTP/1.1 #{code}"
+  defp status_line(code), do: "HTTP/1.1 " <> :erlang.integer_to_binary(code)
 end

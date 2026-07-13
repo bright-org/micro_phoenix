@@ -9,6 +9,21 @@ defmodule MicroPhoenix do
   @send_start 0xE7101106
   @send_ok 0xE7101107
   @close_ok 0xE7101108
+  @response_built 0xE7101109
+  @send_rest 0xE710110A
+  @send_unexpected 0xE710110B
+  @client_done_send_ok 0xE7101110
+  @client_done_send_partial_ok 0xE7101111
+  @client_done_send_error 0xE7101112
+  @client_done_send_unexpected 0xE7101113
+  @parse_start 0xE7101120
+  @parse_ok 0xE7101121
+  @parse_exception 0xE710112F
+  @route_start 0xE7101130
+  @route_ok 0xE7101131
+  @build_start 0xE7101140
+  @build_ok 0xE7101141
+  @build_exception 0xE710114F
   @accept_error 0xE71011E3
   @recv_error 0xE71011E5
   @send_error 0xE71011E7
@@ -62,36 +77,31 @@ defmodule MicroPhoenix do
       case :gen_tcp.recv(socket, 0) do
         {:ok, data} ->
           mark(@recv_ok)
-          mark(@send_start)
 
-          response =
-            data
-            |> MicroPhoenix.Request.parse()
-            |> route()
-            |> MicroPhoenix.Response.build()
+          case response_for(data) do
+            {:ok, response} ->
+              mark(@send_start)
+              send_status = send_response(socket, response)
+              mark_client_done(send_status)
 
-          case :gen_tcp.send(socket, response) do
-            :ok ->
-              mark(@send_ok)
-
-            {:error, _reason} ->
-              mark(@send_error)
+            :error ->
+              :ok
           end
 
-          close_socket(socket)
+          close_socket(socket, false)
 
         {:error, _reason} ->
           mark(@recv_error)
-          close_socket(socket)
+          close_socket(socket, false)
       end
     rescue
       _ ->
         mark(@client_exception)
-        close_socket(socket)
+        close_socket(socket, false)
     catch
       _, _ ->
         mark(@client_exception)
-        close_socket(socket)
+        close_socket(socket, false)
     end
   end
 
@@ -108,10 +118,111 @@ defmodule MicroPhoenix do
     end
   end
 
-  defp close_socket(socket) do
+  defp response_for(data) do
+    case parse_request(data) do
+      {:ok, request} ->
+        case route_request(request) do
+          {:ok, routed} ->
+            build_response(routed)
+
+          :error ->
+            :error
+        end
+
+      :error ->
+        :error
+    end
+  end
+
+  defp parse_request(data) do
+    try do
+      mark(@parse_start)
+      request = MicroPhoenix.Request.parse(data)
+      mark(@parse_ok)
+      {:ok, request}
+    rescue
+      _ ->
+        mark(@parse_exception)
+        :error
+    catch
+      _, _ ->
+        mark(@parse_exception)
+        :error
+    end
+  end
+
+  defp route_request(request) do
+    try do
+      mark(@route_start)
+      routed = route(request)
+      mark(@route_ok)
+      {:ok, routed}
+    rescue
+      _ ->
+        # Preserve the last router/controller marker; otherwise this catch-all
+        # hides the exact route stage that raised on bare-metal AtomVM.
+        :error
+    catch
+      _, _ ->
+        # Preserve the last router/controller marker; otherwise this catch-all
+        # hides the exact route stage that raised on bare-metal AtomVM.
+        :error
+    end
+  end
+
+  defp build_response(routed) do
+    try do
+      mark(@build_start)
+      response = MicroPhoenix.Response.build(routed)
+      mark(@build_ok)
+      mark(@response_built)
+      {:ok, response}
+    rescue
+      _ ->
+        mark(@build_exception)
+        :error
+    catch
+      _, _ ->
+        mark(@build_exception)
+        :error
+    end
+  end
+
+  defp send_response(socket, response) do
+    case :gen_tcp.send(socket, response) do
+      :ok ->
+        mark(@send_ok)
+        :ok
+
+      {:ok, rest} when is_binary(rest) ->
+        mark(@send_rest)
+
+        case send_response(socket, rest) do
+          :ok -> :partial_ok
+          other -> other
+        end
+
+      {:error, _reason} ->
+        mark(@send_error)
+        :error
+
+      _other ->
+        mark(@send_unexpected)
+        :unexpected
+    end
+  end
+
+  defp mark_client_done(:ok), do: mark(@client_done_send_ok)
+  defp mark_client_done(:partial_ok), do: mark(@client_done_send_partial_ok)
+  defp mark_client_done(:error), do: mark(@client_done_send_error)
+  defp mark_client_done(:unexpected), do: mark(@client_done_send_unexpected)
+
+  defp close_socket(socket, mark_success) do
     case :gen_tcp.close(socket) do
       :ok ->
-        mark(@close_ok)
+        if mark_success do
+          mark(@close_ok)
+        end
 
       {:error, _reason} ->
         mark(@close_error)

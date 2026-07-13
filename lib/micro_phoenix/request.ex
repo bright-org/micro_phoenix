@@ -2,28 +2,54 @@ defmodule MicroPhoenix.Request do
   defstruct method: :get, path: "/", headers: %{}
 
   def parse(data) when is_binary(data) do
-    case String.split(data, "\r\n") do
-      [request_line | _rest] ->
-        case String.split(request_line, " ") do
-          [method, path | _] ->
-            %__MODULE__{
-              method: method |> String.downcase() |> String.to_atom(),
-              path: normalize_path(path)
-            }
+    case request_line(data) do
+      nil ->
+        %__MODULE__{}
 
-          _ ->
-            %__MODULE__{}
-        end
+      line ->
+        parse_request_line(line)
+    end
+  end
+
+  defp request_line(data) do
+    case :binary.split(data, "\r\n") do
+      [line, _rest] -> line
+      [line] -> line
+    end
+  end
+
+  defp parse_request_line(line) do
+    case :binary.split(line, " ", [:global]) do
+      [method, path | _] ->
+        %__MODULE__{
+          method: method_atom(method),
+          path: normalize_path(path)
+        }
 
       _ ->
         %__MODULE__{}
     end
   end
 
+  defp method_atom("GET"), do: :get
+  defp method_atom("POST"), do: :post
+  defp method_atom("PUT"), do: :put
+  defp method_atom("PATCH"), do: :patch
+  defp method_atom("DELETE"), do: :delete
+  defp method_atom("HEAD"), do: :head
+  defp method_atom("OPTIONS"), do: :options
+  defp method_atom(_method), do: :unknown
+
   defp normalize_path(path) do
-    path
-    |> String.split("?")
-    |> hd()
-    |> then(fn p -> if p == "", do: "/", else: p end)
+    normalized =
+      case :binary.split(path, "?") do
+        [prefix, _query] -> prefix
+        [prefix] -> prefix
+      end
+
+    case normalized do
+      "" -> "/"
+      _ -> normalized
+    end
   end
 end
