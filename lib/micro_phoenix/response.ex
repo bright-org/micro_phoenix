@@ -13,12 +13,8 @@ defmodule MicroPhoenix.Response do
     http_response(status, content_type, body, [])
   end
 
-  def build({:error, 404}) do
-    http_response(404, "text/plain", "404 Not Found", [])
-  end
-
-  def build({:error, 405}) do
-    http_response(405, "text/plain", "405 Method Not Allowed", [])
+  def build({:error, status}) when is_integer(status) do
+    http_response(status, "text/plain", error_body(status), [])
   end
 
   def build(_other), do: build({:error, 404})
@@ -58,6 +54,10 @@ defmodule MicroPhoenix.Response do
   defp status_line(404), do: "HTTP/1.1 404 Not Found"
   defp status_line(405), do: "HTTP/1.1 405 Method Not Allowed"
   defp status_line(code), do: "HTTP/1.1 " <> integer_to_binary(code)
+
+  defp error_body(404), do: "404 Not Found"
+  defp error_body(405), do: "405 Method Not Allowed"
+  defp error_body(status), do: "HTTP Error " <> integer_to_binary(status)
 
   defp integer_to_binary(n) when is_integer(n) and n >= 0 do
     if n == 0 do
