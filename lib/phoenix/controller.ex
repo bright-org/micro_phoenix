@@ -31,7 +31,8 @@ defmodule Phoenix.Controller do
   end
 
   def protect_from_forgery(conn, _opts \\ []) do
-    Plug.Conn.assign(conn, :csrf_token, Plug.CSRFProtection.get_csrf_token())
+    # Avoid Plug.CSRFProtection (Process dict / crypto not available on AtomVM).
+    Plug.Conn.assign(conn, :csrf_token, "atomvm")
   end
 
   def put_secure_browser_headers(conn, _opts \\ []) do
@@ -92,7 +93,7 @@ defmodule Phoenix.Controller do
 
   def put_status(conn, status), do: %{conn | status: status}
 
-  def get_csrf_token, do: Plug.CSRFProtection.get_csrf_token()
+  def get_csrf_token, do: "atomvm"
 
   def view_module(conn, controller \\ nil) do
     conn.private[:phoenix_view] || default_view_module(controller || conn.private[:phoenix_controller])
@@ -107,13 +108,14 @@ defmodule Phoenix.Controller do
   def status_message_from_template(template), do: template
 
   defp prepare_assigns(conn, assigns) do
+    # Avoid Map.put_new/3 (missing on some AtomVM Elixir builds).
     merged =
       assigns
       |> Enum.into(%{})
       |> Map.merge(conn.assigns)
-      |> Map.put_new(:flash, conn.assigns[:flash] || %{})
 
-    %{conn | assigns: merged}
+    flash = Map.get(merged, :flash) || %{}
+    %{conn | assigns: Map.put(merged, :flash, flash)}
   end
 
   defp infer_controller(conn) do
@@ -122,10 +124,40 @@ defmodule Phoenix.Controller do
 
   defp default_view_module(nil), do: nil
 
-  defp default_view_module(controller) do
-    parts = Module.split(controller)
-    base = parts |> List.last() |> String.replace_suffix("Controller", "HTML")
-    Module.concat(Enum.drop(parts, -1) ++ [base])
+  defp default_view_module(controller) when is_atom(controller) do
+    # Avoid Module.split/1 and String.replace_suffix/2 (missing on AtomVM).
+    parts =
+      controller
+      |> Atom.to_string()
+      |> strip_elixir_prefix()
+      |> Phoenix.Binary.split(".")
+
+    base = parts |> List.last() |> controller_to_html()
+    module_from_parts(drop_last(parts) ++ [base])
+  end
+
+  defp strip_elixir_prefix(<<"Elixir.", rest::binary>>), do: rest
+  defp strip_elixir_prefix(other), do: other
+
+  defp controller_to_html(name) when is_binary(name) do
+    suffix = "Controller"
+    size = byte_size(name)
+    suffix_size = byte_size(suffix)
+
+    if size >= suffix_size and binary_part(name, size - suffix_size, suffix_size) == suffix do
+      binary_part(name, 0, size - suffix_size) <> "HTML"
+    else
+      name <> "HTML"
+    end
+  end
+
+  defp drop_last([]), do: []
+  defp drop_last([_]), do: []
+  defp drop_last([h | t]), do: [h | drop_last(t)]
+
+  defp module_from_parts(parts) when is_list(parts) do
+    ("Elixir." <> Enum.join(parts, "."))
+    |> :erlang.binary_to_atom(:utf8)
   end
 
   defp render_layout(conn, inner) do
@@ -143,7 +175,7 @@ defmodule Phoenix.Controller do
     end
   end
 
-  defp resolve_layout_module({:__aliases__, _, parts}), do: Module.concat(parts)
+  defp resolve_layout_module({:__aliases__, _, parts}), do: module_from_parts(Enum.map(parts, &to_string/1))
   defp resolve_layout_module(mod) when is_atom(mod), do: mod
 
   defp to_resp_body({:safe, html}), do: flatten_iodata(html)

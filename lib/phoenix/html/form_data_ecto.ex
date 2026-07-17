@@ -50,19 +50,46 @@ if Code.ensure_loaded?(Phoenix.HTML) do
     defp form_for_errors(%{action: :ignore}, _action), do: []
 
     defp form_for_errors(%{errors: errors}, _action) do
-      for {field, {msg, opts}} <- errors do
-        {field, {msg, opts}}
-      end
+      Enum.map(errors, fn {field, {msg, opts}} -> {field, {msg, opts}} end)
     end
 
     defp form_for_errors(_, _), do: []
 
     defp form_for_name(%{__struct__: module}) do
       module
-      |> Module.split()
+      |> Atom.to_string()
+      |> strip_elixir_prefix()
+      |> Phoenix.Binary.split(".")
       |> List.last()
-      |> Macro.underscore()
+      |> camel_to_snake()
     end
+
+    defp strip_elixir_prefix(<<"Elixir.", rest::binary>>), do: rest
+    defp strip_elixir_prefix(other), do: other
+
+    # AtomVM has no Elixir.Macro — minimal camelCase -> snake_case for form names.
+    defp camel_to_snake(name) when is_binary(name), do: camel_to_snake(name, <<>>, nil)
+
+    defp camel_to_snake(<<>>, acc, _prev), do: acc
+
+    defp camel_to_snake(<<c, rest::binary>>, acc, prev) when c >= ?A and c <= ?Z do
+      lc = c + 32
+
+      need_underscore =
+        prev != nil and
+          ((prev >= ?a and prev <= ?z) or
+             (prev >= ?A and prev <= ?Z and starts_with_lower?(rest)))
+
+      acc = if need_underscore, do: acc <> "_", else: acc
+      camel_to_snake(rest, acc <> <<lc>>, c)
+    end
+
+    defp camel_to_snake(<<c, rest::binary>>, acc, _prev) do
+      camel_to_snake(rest, acc <> <<c>>, c)
+    end
+
+    defp starts_with_lower?(<<c, _::binary>>) when c >= ?a and c <= ?z, do: true
+    defp starts_with_lower?(_), do: false
 
     defp form_for_name(_), do: "changeset"
 

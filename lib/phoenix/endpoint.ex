@@ -113,9 +113,7 @@ defmodule Phoenix.Endpoint.Server do
   defp serve(socket, endpoint, endpoint_opts) do
     try do
       with {:ok, data} <- :gen_tcp.recv(socket, 0),
-           {:ok, conn} <- build_conn(data),
-           conn when is_map(conn) <- endpoint.call(conn, endpoint_opts),
-           response <- encode_response(conn) do
+           {:ok, response} <- dispatch(data, endpoint, endpoint_opts) do
         :gen_tcp.send(socket, response)
       else
         _ -> :gen_tcp.send(socket, encode_raw(500, "Internal Server Error"))
@@ -126,6 +124,36 @@ defmodule Phoenix.Endpoint.Server do
         :gen_tcp.send(socket, encode_raw(500, "Internal Server Error"))
     after
       :gen_tcp.close(socket)
+    end
+  end
+
+  @doc false
+  def dispatch(data, endpoint, endpoint_opts \\ []) when is_binary(data) do
+    with {:ok, conn} <- build_conn(data),
+         conn when is_map(conn) <- endpoint.call(conn, endpoint_opts) do
+      {:ok, encode_response(conn)}
+    else
+      _ -> {:error, :dispatch_failed}
+    end
+  end
+
+  @doc false
+  def dispatch_router(data, router, router_opts \\ []) when is_binary(data) do
+    with {:ok, conn} <- build_conn(data) do
+      static_opts = Keyword.get(router_opts, :static, [])
+
+      case Phoenix.Static.try_serve(conn, static_opts) do
+        {:ok, conn} ->
+          {:ok, encode_response(conn)}
+
+        :miss ->
+          case router.call(conn, Keyword.delete(router_opts, :static)) do
+            conn when is_map(conn) -> {:ok, encode_response(conn)}
+            _ -> {:error, :dispatch_failed}
+          end
+      end
+    else
+      _ -> {:error, :dispatch_failed}
     end
   end
 
@@ -141,31 +169,37 @@ defmodule Phoenix.Endpoint.Server do
   end
 
   defp build_conn(data) do
-    case String.split(data, "\r\n\r\n", parts: 2) do
+    case Phoenix.Binary.split2(data, "\r\n\r\n") do
       [header_part, body] ->
-        [request_line | headers] = String.split(header_part, "\r\n")
-        [method, target, _version] = String.split(request_line, " ")
-        {path, query} = split_target(target)
-        method = method |> String.upcase()
-        req_headers = parse_headers(headers)
-        body_params = parse_body_params(req_headers, body)
+        [request_line | headers] = Phoenix.Binary.split(header_part, "\r\n")
 
-        conn = %Plug.Conn{
-          adapter: {Phoenix.Endpoint.GenTCPAdapter, %Phoenix.Endpoint.GenTCPAdapter{}},
-          method: method,
-          request_path: path,
-          path_info: String.split(path, "/", trim: true),
-          query_string: query,
-          req_headers: req_headers,
-          body_params: body_params,
-          params: body_params,
-          scheme: :http,
-          host: "localhost",
-          port: 4000,
-          remote_ip: {127, 0, 0, 1}
-        }
+        case Phoenix.Binary.split(request_line, " ") do
+          [method, target | _rest] ->
+            {path, query} = split_target(target)
+            method = Phoenix.Binary.upcase_ascii(method)
+            req_headers = parse_headers(headers)
+            body_params = parse_body_params(req_headers, body)
 
-        {:ok, conn}
+            conn = %Plug.Conn{
+              adapter: {Phoenix.Endpoint.GenTCPAdapter, %Phoenix.Endpoint.GenTCPAdapter{}},
+              method: override_method(method, body_params),
+              request_path: path,
+              path_info: Phoenix.Binary.split_trim(path, "/"),
+              query_string: query,
+              req_headers: req_headers,
+              body_params: Map.delete(body_params, "_method"),
+              params: Map.delete(body_params, "_method"),
+              scheme: :http,
+              host: "localhost",
+              port: 4000,
+              remote_ip: {127, 0, 0, 1}
+            }
+
+            {:ok, conn}
+
+          _ ->
+            {:error, :invalid_request}
+        end
 
       _ ->
         {:error, :invalid_request}
@@ -174,8 +208,18 @@ defmodule Phoenix.Endpoint.Server do
     ArgumentError -> {:error, :invalid_method}
   end
 
+  # Browser forms send POST + `_method` for PUT/PATCH/DELETE.
+  defp override_method(method, %{"_method" => override}) when is_binary(override) do
+    case Phoenix.Binary.upcase_ascii(override) do
+      m when m in ["PUT", "PATCH", "DELETE"] -> m
+      _ -> method
+    end
+  end
+
+  defp override_method(method, _params), do: method
+
   defp split_target(target) do
-    case String.split(target, "?", parts: 2) do
+    case Phoenix.Binary.split2(target, "?") do
       [path, query] -> {path, query}
       [path] -> {path, ""}
     end
@@ -183,8 +227,9 @@ defmodule Phoenix.Endpoint.Server do
 
   defp parse_headers(headers) do
     Enum.map(headers, fn line ->
-      case String.split(line, ": ", parts: 2) do
-        [k, v] -> {String.downcase(k), v}
+      case Phoenix.Binary.split2(line, ": ") do
+        [k, v] -> {Phoenix.Binary.downcase_ascii(k), v}
+        [k] -> {Phoenix.Binary.downcase_ascii(k), ""}
         _ -> {line, ""}
       end
     end)
@@ -198,14 +243,55 @@ defmodule Phoenix.Endpoint.Server do
         _ -> false
       end)
 
-    if String.starts_with?(content_type, "application/x-www-form-urlencoded") do
-      body
-      |> URI.decode_query()
-      |> nest_params()
+    if Phoenix.Binary.starts_with?(content_type, "application/x-www-form-urlencoded") do
+      decode_form_body(body)
     else
       %{}
     end
   end
+
+  # Minimal x-www-form-urlencoded decoder (no URI / String / Regex).
+  defp decode_form_body(body) when is_binary(body) do
+    body
+    |> Phoenix.Binary.split("&")
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reduce(%{}, fn pair, acc ->
+      case Phoenix.Binary.split2(pair, "=") do
+        [key, value] ->
+          put_nested(acc, parse_key_path(url_decode(key)), url_decode(value))
+
+        [key] ->
+          put_nested(acc, parse_key_path(url_decode(key)), "")
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp url_decode(bin) when is_binary(bin) do
+    url_decode(bin, <<>>)
+  end
+
+  defp url_decode(<<"+", rest::binary>>, acc), do: url_decode(rest, <<acc::binary, ?\s>>)
+
+  defp url_decode(<<"%", h1, h2, rest::binary>>, acc) do
+    case {hex_val(h1), hex_val(h2)} do
+      {v1, v2} when is_integer(v1) and is_integer(v2) ->
+        url_decode(rest, <<acc::binary, (v1 * 16 + v2)>>)
+
+      _ ->
+        url_decode(<<h1, h2, rest::binary>>, <<acc::binary, ?%>>)
+    end
+  end
+
+  defp url_decode(<<c, rest::binary>>, acc), do: url_decode(rest, <<acc::binary, c>>)
+  defp url_decode(<<>>, acc), do: acc
+
+  defp hex_val(c) when c in ?0..?9, do: c - ?0
+  defp hex_val(c) when c in ?a..?f, do: c - ?a + 10
+  defp hex_val(c) when c in ?A..?F, do: c - ?A + 10
+  defp hex_val(_), do: nil
 
   # Convert flat "post[title]" keys into %{"post" => %{"title" => ...}}.
   defp nest_params(params) when is_map(params) do
@@ -215,16 +301,20 @@ defmodule Phoenix.Endpoint.Server do
   end
 
   defp parse_key_path(key) when is_binary(key) do
-    case Regex.run(~r/^([^\[]+)((?:\[[^\]]*\])*)$/, key) do
-      [_, head, rest] ->
+    case Phoenix.Binary.split2(key, "[") do
+      [head] ->
+        [head]
+
+      [head, rest] ->
         brackets =
-          Regex.scan(~r/\[([^\]]*)\]/, rest)
-          |> Enum.map(fn [_, part] -> part end)
+          rest
+          |> Phoenix.Binary.split("]")
+          |> Enum.flat_map(fn
+            "" -> []
+            part -> Phoenix.Binary.split_trim(part, "[")
+          end)
 
         [head | brackets]
-
-      _ ->
-        [key]
     end
   end
 
@@ -259,8 +349,12 @@ defmodule Phoenix.Endpoint.Server do
   end
 
   defp put_content_length(headers, body) do
-    headers = Enum.reject(headers, fn {k, _} -> String.downcase(k) == "content-length" end)
-    [{"content-length", Integer.to_string(byte_size(body))} | headers]
+    headers =
+      Enum.reject(headers, fn {k, _} ->
+        Phoenix.Binary.downcase_ascii(to_string(k)) == "content-length"
+      end)
+
+    [{"content-length", :erlang.integer_to_binary(byte_size(body))} | headers]
   end
 
   defp status_message(200), do: "OK"

@@ -1,33 +1,23 @@
-defprotocol MicroPhoenix.Param do
+defmodule MicroPhoenix.Param do
   @moduledoc false
-  @fallback_to_any true
-  @spec to_param(term) :: String.t()
-  def to_param(term)
-end
 
-defimpl MicroPhoenix.Param, for: Integer do
-  def to_param(int), do: Integer.to_string(int)
-end
+  # AtomVM: avoid Elixir protocols (consolidated impl modules missing at runtime).
 
-defimpl MicroPhoenix.Param, for: BitString do
+  def to_param(int) when is_integer(int), do: :erlang.integer_to_binary(int)
   def to_param(bin) when is_binary(bin), do: bin
-end
+  def to_param(atom) when is_atom(atom) and not is_nil(atom), do: Atom.to_string(atom)
 
-defimpl MicroPhoenix.Param, for: Atom do
-  def to_param(nil), do: raise(ArgumentError, "cannot convert nil to param")
-  def to_param(atom), do: Atom.to_string(atom)
-end
-
-defimpl MicroPhoenix.Param, for: Any do
   def to_param(%{id: nil}) do
     raise ArgumentError, "cannot convert struct to param, key :id contains a nil value"
   end
 
-  def to_param(%{id: id}) when is_integer(id), do: Integer.to_string(id)
-  def to_param(%{id: id}) when is_binary(id), do: id
-  def to_param(%{id: id}), do: MicroPhoenix.Param.to_param(id)
+  def to_param(%{id: id}), do: to_param(id)
+
+  def to_param(nil) do
+    raise ArgumentError, "cannot convert nil to param"
+  end
 
   def to_param(data) do
-    raise Protocol.UndefinedError, protocol: @protocol, value: data
+    raise ArgumentError, "cannot convert #{inspect(data)} to param"
   end
 end

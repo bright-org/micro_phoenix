@@ -1,6 +1,34 @@
 defmodule Phoenix.Template do
   @moduledoc false
 
+  # AtomVM: struct[field] may not use Access; templates rewrite to this helper.
+  # Avoid Phoenix.HTML.Form.fetch/2 — its field_errors/2 uses `for`, which needs elixir_erl_pass.
+  def form_field(%Phoenix.HTML.Form{errors: errors} = form, field) when is_atom(field) do
+    build_form_field(form, field, Atom.to_string(field), errors)
+  end
+
+  def form_field(%Phoenix.HTML.Form{errors: errors} = form, field) when is_binary(field) do
+    build_form_field(form, field, field, errors)
+  end
+
+  defp build_form_field(form, field, field_as_string, errors) do
+    %Phoenix.HTML.FormField{
+      errors: form_field_errors(errors, field),
+      field: field,
+      form: form,
+      id: Phoenix.HTML.Form.input_id(form, field_as_string),
+      name: Phoenix.HTML.Form.input_name(form, field_as_string),
+      value: Phoenix.HTML.Form.input_value(form, field)
+    }
+  end
+
+  defp form_field_errors(errors, field) when is_list(errors) do
+    Enum.flat_map(errors, fn
+      {^field, error} -> [error]
+      _ -> []
+    end)
+  end
+
   defmacro __using__(opts) do
     quote do
       import Phoenix.Template, only: [embed_templates: 1, embed_templates: 2]
@@ -59,14 +87,94 @@ defmodule Phoenix.Template do
       |> convert_self_closing_components()
       |> convert_paired_components()
       |> convert_control_flow_tags()
+      # HEEx allows `<div />` / `<span />`; HTML browsers treat those as open tags and
+      # nest the rest of the page inside them (often inside `[hidden]` flashes).
+      |> expand_html_self_closing_tags()
       |> convert_attr_expressions()
       |> protect_eex()
       |> convert_body_interpolations()
       |> restore_eex()
       |> soft_assigns()
+      |> rewrite_form_field_access()
 
     restore_scripts(converted, scripts)
   end
+
+  # AtomVM may not dispatch struct[] through Access; call fetch/2 explicitly.
+  defp rewrite_form_field_access(source) when is_binary(source) do
+    source =
+      Regex.replace(
+        ~r/\bf\[:([A-Za-z_][\w]*)\]/,
+        source,
+        "Phoenix.Template.form_field(f, :\\1)"
+      )
+
+    Regex.replace(
+      ~r/(Map\.get\(var!\(assigns\), :form\))\[:([A-Za-z_][\w]*)\]/,
+      source,
+      "Phoenix.Template.form_field(\\1, :\\2)"
+    )
+  end
+
+  @void_html_tags ~w(area base br col embed hr img input link meta param source track wbr)
+
+  # Expand `<span .../>` → `<span ...></span>` (etc.) so browsers don't swallow siblings.
+  defp expand_html_self_closing_tags(source), do: expand_html_self_closing_tags(source, "")
+
+  defp expand_html_self_closing_tags(<<"</", rest::binary>>, acc) do
+    case :binary.split(rest, ">") do
+      [tag, more] -> expand_html_self_closing_tags(more, acc <> "</" <> tag <> ">")
+      [_] -> acc <> "</" <> rest
+    end
+  end
+
+  defp expand_html_self_closing_tags(<<"<!--", rest::binary>>, acc) do
+    case :binary.split(rest, "-->") do
+      [body, more] -> expand_html_self_closing_tags(more, acc <> "<!--" <> body <> "-->")
+      [_] -> acc <> "<!--" <> rest
+    end
+  end
+
+  defp expand_html_self_closing_tags(<<"<%", rest::binary>>, acc) do
+    case take_eex(rest, "<%") do
+      {chunk, more} -> expand_html_self_closing_tags(more, acc <> chunk)
+      :error -> acc <> "<%" <> rest
+    end
+  end
+
+  defp expand_html_self_closing_tags(<<"<", rest::binary>>, acc) do
+    case Regex.run(~r/^([a-zA-Z][\w:-]*)/, rest) do
+      [match, tag] ->
+        after_name = binary_part(rest, byte_size(match), byte_size(rest) - byte_size(match))
+
+        case take_tag_attrs(after_name, "") do
+          {:self_closing, attrs, rest2} ->
+            rendered =
+              if tag in @void_html_tags do
+                "<" <> tag <> attrs <> ">"
+              else
+                "<" <> tag <> attrs <> "></" <> tag <> ">"
+              end
+
+            expand_html_self_closing_tags(rest2, acc <> rendered)
+
+          {:open, attrs, rest2} ->
+            expand_html_self_closing_tags(rest2, acc <> "<" <> tag <> attrs <> ">")
+
+          :error ->
+            expand_html_self_closing_tags(rest, acc <> "<")
+        end
+
+      nil ->
+        expand_html_self_closing_tags(rest, acc <> "<")
+    end
+  end
+
+  defp expand_html_self_closing_tags(<<c::utf8, rest::binary>>, acc) do
+    expand_html_self_closing_tags(rest, acc <> <<c::utf8>>)
+  end
+
+  defp expand_html_self_closing_tags(<<>>, acc), do: acc
 
   # Use Map.get so missing assigns don't crash templates during gradual compatibility.
   defp soft_assigns(source) do
@@ -86,54 +194,81 @@ defmodule Phoenix.Template do
   end
 
   # Convert HEEx attribute spreads like `{@rest}` inside tags only.
-  # Require that the next `>` appears before any `<`, so body `{@inner_content}` is untouched.
+  # Function components get `__spread__` (merged into assigns); HTML tags get __attrs__.
   defp drop_attribute_spreads(source) do
+    source =
+      Regex.replace(
+        ~r/(<(?:Layouts\.[\w]+|\.[\w]+)\b[^>]*?)\s\{@([a-zA-Z_][\w]*)\}(?=[^<]*?>)/,
+        source,
+        fn full, _tag, name ->
+          String.replace(
+            full,
+            "{@#{name}}",
+            "__spread__={Map.get(var!(assigns), :#{name})}",
+            global: false
+          )
+        end
+      )
+
     Regex.replace(~r/\s\{@([a-zA-Z_][\w]*)\}(?=[^<]*?>)/, source, fn _, name ->
       " <%= Phoenix.Template.__attrs__(Map.get(var!(assigns), :#{name})) %>"
     end)
   end
 
-  def __attrs__(nil), do: ""
-  def __attrs__(false), do: ""
+  def __attrs__(nil), do: {:safe, ""}
+  def __attrs__(false), do: {:safe, ""}
 
   def __attrs__(attrs) when is_map(attrs) or is_list(attrs) do
-    attrs
-    |> Enum.reject(fn
-      {_k, nil} -> true
-      {_k, false} -> true
-      {:inner_block, _} -> true
-      {"inner_block", _} -> true
-      {:rest, _} -> true
-      {"rest", _} -> true
-      {k, _} when k in [:actions, :action, :col, :item, :subtitle] -> true
-      _ -> false
-    end)
-    |> Enum.map(fn {key, value} ->
-      # Avoid String.replace/3 for AtomVM (no Elixir.String module).
-      key = key |> to_string() |> underscore_to_dash()
+    rendered =
+      attrs
+      |> Enum.reject(fn
+        {_k, nil} -> true
+        {_k, false} -> true
+        {:inner_block, _} -> true
+        {"inner_block", _} -> true
+        {:rest, _} -> true
+        {"rest", _} -> true
+        {k, _} when k in [:actions, :action, :col, :item, :subtitle] -> true
+        _ -> false
+      end)
+      |> Enum.map(fn {key, value} ->
+        # Avoid String.replace/3 for AtomVM (no Elixir.String module).
+        key = key |> to_string() |> underscore_to_dash()
 
-      cond do
-        value == true ->
-          key
+        cond do
+          value == true ->
+            " #{key}"
 
-        is_binary(value) or is_atom(value) or is_number(value) ->
-          escaped =
-            case Phoenix.HTML.html_escape(to_string(value)) do
-              {:safe, data} -> IO.iodata_to_binary(data)
-              other -> to_string(other)
-            end
+          is_binary(value) or is_atom(value) or is_number(value) ->
+            " #{key}=\"#{attr_escape(to_string(value))}\""
 
-          ~s(#{key}="#{escaped}")
+          is_struct(value, Phoenix.LiveView.JS) ->
+            " #{key}=\"#{attr_escape(js_to_attr(value))}\""
 
-        true ->
-          ""
-      end
-    end)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.join(" ")
+          true ->
+            ""
+        end
+      end)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join()
+
+    {:safe, rendered}
   end
 
-  def __attrs__(_), do: ""
+  def __attrs__(_), do: {:safe, ""}
+
+  defp js_to_attr(%Phoenix.LiveView.JS{} = js) do
+    js
+    |> Phoenix.HTML.Safe.to_iodata()
+    |> IO.iodata_to_binary()
+  end
+
+  defp attr_escape(bin) when is_binary(bin) do
+    case Phoenix.HTML.html_escape(bin) do
+      {:safe, data} -> IO.iodata_to_binary(data)
+      other -> to_string(other)
+    end
+  end
 
   defp underscore_to_dash(bin) when is_binary(bin) do
     for <<c <- bin>>, into: <<>> do
@@ -142,52 +277,199 @@ defmodule Phoenix.Template do
   end
 
   defp convert_self_closing_components(source) do
-    Regex.replace(~r/<((?:Layouts\.)[\w]+|\.[\w]+)(\s[^>]*?|\s*)\/>/s, source, fn _full, tag, attrs ->
-      fun = component_fun(tag)
-      {for_expr, if_expr, _let_expr, rest_attrs} = split_special_attrs(attrs)
-      call = wrap_component_call(fun, rest_attrs, nil)
-
-      cond do
-        for_expr && if_expr ->
-          "<%= for #{for_expr} do %><%= if #{if_expr} do %><%= #{call} %><% end %><% end %>"
-
-        for_expr ->
-          "<%= for #{for_expr} do %><%= #{call} %><% end %>"
-
-        if_expr ->
-          "<%= if #{if_expr} do %><%= #{call} %><% end %>"
-
-        true ->
-          "<%= #{call} %>"
-      end
-    end)
+    convert_self_closing_components(source, "")
   end
 
-  defp convert_paired_components(source) do
-    Regex.replace(
-      ~r/<((?:Layouts\.)[\w]+|\.[\w]+)([^>]*)>(.*?)<\/\1>/s,
-      source,
-      fn _, name, attrs, inner ->
+  defp convert_self_closing_components(<<"<", rest::binary>>, acc) do
+    case take_component_open(rest) do
+      {:self_closing, name, attrs, rest2} ->
         fun = component_fun(name)
-        # Convert nested components first so they own their <:slots>
-        inner = convert_paired_components(inner)
-        {slots, default_inner} = extract_named_slots(inner)
+        {for_expr, if_expr, _let_expr, rest_attrs} = split_special_attrs(attrs)
+        call = wrap_component_call(fun, rest_attrs, nil)
 
-        case split_special_attrs(attrs) do
-          {nil, nil, let_expr, rest_attrs} ->
-            wrap_component(fun, rest_attrs, default_inner, slots, let_expr)
+        rendered =
+          cond do
+            for_expr && if_expr ->
+              "<%= for #{for_expr} do %><%= if #{if_expr} do %><%= #{call} %><% end %><% end %>"
 
-          {nil, if_expr, let_expr, rest_attrs} ->
-            "<%= if #{if_expr} do %>#{wrap_component(fun, rest_attrs, default_inner, slots, let_expr)}<% end %>"
+            for_expr ->
+              "<%= for #{for_expr} do %><%= #{call} %><% end %>"
 
-          {for_expr, nil, let_expr, rest_attrs} ->
-            "<%= for #{for_expr} do %>#{wrap_component(fun, rest_attrs, default_inner, slots, let_expr)}<% end %>"
+            if_expr ->
+              "<%= if #{if_expr} do %><%= #{call} %><% end %>"
 
-          {for_expr, if_expr, let_expr, rest_attrs} ->
-            "<%= for #{for_expr} do %><%= if #{if_expr} do %>#{wrap_component(fun, rest_attrs, default_inner, slots, let_expr)}<% end %><% end %>"
+            true ->
+              "<%= #{call} %>"
+          end
+
+        convert_self_closing_components(rest2, acc <> rendered)
+
+      {:open, _name, _attrs, _rest2} ->
+        # Paired components are handled in a later pass.
+        convert_self_closing_components(rest, acc <> "<")
+
+      :not_component ->
+        convert_self_closing_components(rest, acc <> "<")
+
+      :incomplete ->
+        acc <> "<" <> rest
+    end
+  end
+
+  defp convert_self_closing_components(<<c::utf8, rest::binary>>, acc) do
+    convert_self_closing_components(rest, acc <> <<c::utf8>>)
+  end
+
+  defp convert_self_closing_components(<<>>, acc), do: acc
+
+  defp convert_paired_components(source) do
+    convert_paired_components(source, "")
+  end
+
+  defp convert_paired_components(<<"<", rest::binary>>, acc) do
+    case take_component_open(rest) do
+      {:open, name, attrs, rest2} ->
+        case take_matched_component_close(rest2, name, 1, "") do
+          {inner, rest3} ->
+            fun = component_fun(name)
+            inner = convert_paired_components(inner)
+            {slots, default_inner} = extract_named_slots(inner)
+
+            rendered =
+              case split_special_attrs(attrs) do
+                {nil, nil, let_expr, rest_attrs} ->
+                  wrap_component(fun, rest_attrs, default_inner, slots, let_expr)
+
+                {nil, if_expr, let_expr, rest_attrs} ->
+                  "<%= if #{if_expr} do %>#{wrap_component(fun, rest_attrs, default_inner, slots, let_expr)}<% end %>"
+
+                {for_expr, nil, let_expr, rest_attrs} ->
+                  "<%= for #{for_expr} do %>#{wrap_component(fun, rest_attrs, default_inner, slots, let_expr)}<% end %>"
+
+                {for_expr, if_expr, let_expr, rest_attrs} ->
+                  "<%= for #{for_expr} do %><%= if #{if_expr} do %>#{wrap_component(fun, rest_attrs, default_inner, slots, let_expr)}<% end %><% end %>"
+              end
+
+            convert_paired_components(rest3, acc <> rendered)
+
+          :error ->
+            convert_paired_components(rest, acc <> "<")
         end
-      end
-    )
+
+      {:self_closing, _name, _attrs, _rest2} ->
+        # Self-closing handled in an earlier pass.
+        convert_paired_components(rest, acc <> "<")
+
+      :not_component ->
+        convert_paired_components(rest, acc <> "<")
+
+      :incomplete ->
+        acc <> "<" <> rest
+    end
+  end
+
+  defp convert_paired_components(<<c::utf8, rest::binary>>, acc) do
+    convert_paired_components(rest, acc <> <<c::utf8>>)
+  end
+
+  defp convert_paired_components(<<>>, acc), do: acc
+
+  # Parse `<.name attrs>` / `<.name attrs/>` without treating `|>` `>` as tag end.
+  defp take_component_open(rest) do
+    case Regex.run(~r/^((?:Layouts\.)[\w]+|\.[\w]+)/, rest) do
+      [match, name] ->
+        after_name = binary_part(rest, byte_size(match), byte_size(rest) - byte_size(match))
+
+        case take_tag_attrs(after_name, "") do
+          {:self_closing, attrs, rest2} -> {:self_closing, name, attrs, rest2}
+          {:open, attrs, rest2} -> {:open, name, attrs, rest2}
+          :error -> :incomplete
+        end
+
+      nil ->
+        :not_component
+    end
+  end
+
+  defp take_tag_attrs(<<"<%", rest::binary>>, acc) do
+    case take_eex(rest, "<%") do
+      {chunk, rest2} -> take_tag_attrs(rest2, acc <> chunk)
+      :error -> :error
+    end
+  end
+
+  defp take_tag_attrs(<<"/>", rest::binary>>, acc), do: {:self_closing, acc, rest}
+  defp take_tag_attrs(<<">", rest::binary>>, acc), do: {:open, acc, rest}
+
+  defp take_tag_attrs(<<"\"", rest::binary>>, acc) do
+    case take_string(rest, "\"") do
+      {str, rest2} -> take_tag_attrs(rest2, acc <> "\"" <> str <> "\"")
+      :error -> :error
+    end
+  end
+
+  defp take_tag_attrs(<<"'", rest::binary>>, acc) do
+    case take_string(rest, "'") do
+      {str, rest2} -> take_tag_attrs(rest2, acc <> "'" <> str <> "'")
+      :error -> :error
+    end
+  end
+
+  defp take_tag_attrs(<<"{", rest::binary>>, acc) do
+    case take_balanced(rest) do
+      {expr, rest2} -> take_tag_attrs(rest2, acc <> "{" <> expr <> "}")
+      :error -> :error
+    end
+  end
+
+  defp take_tag_attrs(<<c::utf8, rest::binary>>, acc) do
+    take_tag_attrs(rest, acc <> <<c::utf8>>)
+  end
+
+  defp take_tag_attrs(<<>>, _acc), do: :error
+
+  defp take_eex(rest, prefix) do
+    case :binary.split(rest, "%>") do
+      [body, more] -> {prefix <> body <> "%>", more}
+      [_] -> :error
+    end
+  end
+
+  defp take_matched_component_close(source, name, depth, acc) do
+    open = "<" <> name
+    close = "</" <> name <> ">"
+
+    cond do
+      String.starts_with?(source, close) ->
+        rest = binary_part(source, byte_size(close), byte_size(source) - byte_size(close))
+
+        if depth == 1 do
+          {acc, rest}
+        else
+          take_matched_component_close(rest, name, depth - 1, acc <> close)
+        end
+
+      String.starts_with?(source, open) ->
+        after_open = binary_part(source, byte_size(open), byte_size(source) - byte_size(open))
+
+        case take_tag_attrs(after_open, "") do
+          {:open, attrs, rest2} ->
+            take_matched_component_close(rest2, name, depth + 1, acc <> open <> attrs <> ">")
+
+          {:self_closing, attrs, rest2} ->
+            take_matched_component_close(rest2, name, depth, acc <> open <> attrs <> "/>")
+
+          :error ->
+            :error
+        end
+
+      source == "" ->
+        :error
+
+      true ->
+        <<c::utf8, rest::binary>> = source
+        take_matched_component_close(rest, name, depth, acc <> <<c::utf8>>)
+    end
   end
 
   defp component_fun(tag) do
@@ -203,13 +485,38 @@ defmodule Phoenix.Template do
   end
 
   defp wrap_component_call(fun, attrs, nil) do
+    {spread_expr, attrs} = extract_spread_attr(attrs)
     assign_map = build_assigns(attrs, nil, [], nil)
-    "#{fun}(%{#{assign_map}})"
+    "#{fun}(#{wrap_assign_map(assign_map, spread_expr)})"
   end
 
   defp wrap_component_call(fun, attrs, {inner, slots, let_expr}) do
+    {spread_expr, attrs} = extract_spread_attr(attrs)
     assign_map = build_assigns(attrs, inner, slots, let_expr)
-    "#{fun}(%{#{assign_map}})"
+    "#{fun}(#{wrap_assign_map(assign_map, spread_expr)})"
+  end
+
+  defp wrap_assign_map(assign_map, nil), do: "%{#{assign_map}}"
+
+  defp wrap_assign_map(assign_map, spread_expr) do
+    "Map.merge(%{#{assign_map}}, #{spread_expr} || %{})"
+  end
+
+  # `{@rest}` on function components becomes `__spread__={...}` (see drop_attribute_spreads/1).
+  defp extract_spread_attr(attrs) when is_binary(attrs) do
+    case Regex.run(~r/\s*__spread__=\{/, attrs, return: :index) do
+      [{start, len}] ->
+        before = binary_part(attrs, 0, start)
+        after_open = binary_part(attrs, start + len, byte_size(attrs) - start - len)
+
+        case take_balanced(after_open) do
+          {expr, rest} -> {expr, before <> rest}
+          :error -> {nil, attrs}
+        end
+
+      nil ->
+        {nil, attrs}
+    end
   end
 
   defp build_assigns(attrs, inner, slots, let_expr) do
@@ -232,6 +539,7 @@ defmodule Phoenix.Template do
 
     # Common attr defaults expected by phx.gen / core_components when attr/3 is a no-op.
     # Do NOT default keys that components set via assign_new/3 (e.g. :name, :value).
+    # Do not default :id — components often use assign_new/3 for it (e.g. flash).
     assign_defaults =
       [
         "id: nil",
@@ -244,7 +552,11 @@ defmodule Phoenix.Template do
         "options: nil",
         "multiple: false",
         "error_class: nil",
-        "variant: nil"
+        "variant: nil",
+        "rows: []",
+        "row_id: nil",
+        "row_click: nil",
+        "row_item: (fn x -> x end)"
       ]
       |> Enum.reject(fn default ->
         key = default |> String.split(":", parts: 2) |> hd() |> String.trim()
@@ -260,10 +572,9 @@ defmodule Phoenix.Template do
       end
 
     rest_assign =
-      if attrs_map == "" do
-        "rest: %{}"
-      else
-        "rest: %{#{attrs_map}}"
+      case global_attrs_map(attrs) do
+        "" -> "rest: %{}"
+        map -> "rest: %{#{map}}"
       end
 
     # defaults first, then attrs/slots so real attributes win on key clashes
@@ -373,17 +684,18 @@ defmodule Phoenix.Template do
             :error
 
           {expr, attrs_without_special} ->
-            case Regex.run(~r/^([^>]*)>/, attrs_without_special, return: :index) do
-              [{0, full_len}, {a0, alen}] ->
-                attrs = binary_part(attrs_without_special, a0, alen)
-                after_open = binary_part(attrs_without_special, full_len, byte_size(attrs_without_special) - full_len)
-
+            # Do not use ([^>]*) here — attribute values may contain `|>`.
+            case take_tag_attrs(attrs_without_special, "") do
+              {:open, attrs, after_open} ->
                 case take_matched_tag(after_open, tag) do
                   {inner, rest} -> {:ok, tag, attrs, expr, inner, rest}
                   :error -> :error
                 end
 
-              nil ->
+              {:self_closing, attrs, rest} ->
+                {:ok, tag, attrs, expr, "", rest}
+
+              :error ->
                 :error
             end
         end
@@ -414,14 +726,16 @@ defmodule Phoenix.Template do
         end
 
       String.starts_with?(source, open) and next_is_tag_boundary(source, byte_size(open)) ->
-        case Regex.run(~r/^#{Regex.escape(open)}([^>]*)>/, source) do
-          [chunk, attrs] ->
-            rest = binary_part(source, byte_size(chunk), byte_size(source) - byte_size(chunk))
-            self_closing? = String.ends_with?(String.trim(attrs), "/")
-            new_depth = if self_closing?, do: depth, else: depth + 1
-            take_matched_tag(rest, tag, new_depth, acc <> chunk)
+        after_open = binary_part(source, byte_size(open), byte_size(source) - byte_size(open))
 
-          nil ->
+        case take_tag_attrs(after_open, "") do
+          {:open, attrs, rest} ->
+            take_matched_tag(rest, tag, depth + 1, acc <> open <> attrs <> ">")
+
+          {:self_closing, attrs, rest} ->
+            take_matched_tag(rest, tag, depth, acc <> open <> attrs <> "/>")
+
+          :error ->
             <<c::utf8, rest::binary>> = source
             take_matched_tag(rest, tag, depth, acc <> <<c::utf8>>)
         end
@@ -581,8 +895,35 @@ defmodule Phoenix.Template do
     |> String.trim()
     |> do_parse_attrs([])
     |> Enum.reverse()
-    |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
+    |> join_assign_entries()
+  end
+
+  # Only HTML/phx global-style attributes belong in `@rest`.
+  defp global_attrs_map(attrs) do
+    attrs
+    |> String.trim()
+    |> do_parse_attrs([])
+    |> Enum.reverse()
+    |> Enum.filter(fn {k, _v} -> global_attr_key?(k) end)
+    |> join_assign_entries()
+  end
+
+  # Parenthesize values so multiline pipelines (|>) stay valid map entries.
+  defp join_assign_entries(entries) do
+    entries
+    |> Enum.map(fn {k, v} -> "#{k}: (#{v})" end)
     |> Enum.join(", ")
+  end
+
+  # HTML globals + Phoenix.Component button/link `:global` includes (href/navigate/...).
+  defp global_attr_key?(key) when is_binary(key) do
+    key in ~w(hidden disabled checked required readonly multiple selected autofocus
+              autoplay controls loop muted open reversed ismap default
+              formmethod formenctype formnovalidate formtarget novalidate
+              href navigate patch method download) or
+      String.starts_with?(key, "phx_") or
+      String.starts_with?(key, "data_") or
+      String.starts_with?(key, "aria_")
   end
 
   defp do_parse_attrs("", acc), do: acc

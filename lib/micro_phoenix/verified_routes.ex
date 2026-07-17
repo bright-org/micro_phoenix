@@ -41,9 +41,7 @@ defmodule MicroPhoenix.VerifiedRoutes do
 
   @doc false
   def __encode_segment__(data) do
-    data
-    |> MicroPhoenix.Param.to_param()
-    |> URI.encode(&URI.char_unreserved?/1)
+    Phoenix.VerifiedRoutes.__encode_segment__(data)
   end
 
   defp split_segments(segments) do

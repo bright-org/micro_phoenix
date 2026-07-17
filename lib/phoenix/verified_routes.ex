@@ -42,8 +42,28 @@ defmodule Phoenix.VerifiedRoutes do
   def __encode_segment__(data) do
     data
     |> Phoenix.Param.to_param()
-    |> URI.encode(&URI.char_unreserved?/1)
+    |> encode_path_segment()
   end
+
+  # Minimal RFC3986 path-segment encoding (no Elixir.URI on AtomVM).
+  defp encode_path_segment(bin) when is_binary(bin) do
+    for <<c <- bin>>, into: <<>> do
+      if path_unreserved?(c) do
+        <<c>>
+      else
+        <<?%, hex_digit(div(c, 16)), hex_digit(rem(c, 16))>>
+      end
+    end
+  end
+
+  defp path_unreserved?(c) when c in ?A..?Z, do: true
+  defp path_unreserved?(c) when c in ?a..?z, do: true
+  defp path_unreserved?(c) when c in ?0..?9, do: true
+  defp path_unreserved?(c) when c in [?-, ?., ?_, ?~], do: true
+  defp path_unreserved?(_), do: false
+
+  defp hex_digit(n) when n <= 9, do: ?0 + n
+  defp hex_digit(n), do: ?A + (n - 10)
 
   defp split_segments(segments) do
     case segments do

@@ -136,10 +136,13 @@ end
 
 defimpl Phoenix.HTML.Safe, for: Phoenix.LiveView.JS do
   def to_iodata(%Phoenix.LiveView.JS{ops: ops}) do
-    ops
-    |> :erlang.term_to_binary()
-    |> Base.encode64()
-    |> then(&["[[\"COMPAT\",", &1, "]]"])
+    # Do not emit raw `"` — attribute values are wrapped in double quotes by HEEx.
+    encoded =
+      ops
+      |> :erlang.term_to_binary()
+      |> Base.encode64()
+
+    ["[[COMPAT,", encoded, "]]"]
   end
 end
 

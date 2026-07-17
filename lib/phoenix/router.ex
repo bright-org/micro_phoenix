@@ -199,11 +199,7 @@ defmodule Phoenix.Router do
   end
 
   defp match_route(method, path, routes) do
-    method =
-      method
-      |> to_string()
-      |> String.downcase()
-      |> String.to_existing_atom()
+    method = Phoenix.Binary.http_method_atom(to_string(method))
 
     Enum.find_value(routes, :error, fn
       {:forward, pattern, plug, _action, _alias, pipeline} ->
@@ -228,30 +224,57 @@ defmodule Phoenix.Router do
 
   defp expand_controller(controller, nil), do: controller
 
-  defp expand_controller(controller, alias) when is_atom(controller) do
-    Module.concat(alias, controller)
+  defp expand_controller(controller, alias) when is_atom(controller) and is_atom(alias) do
+    # Avoid Module.concat/2 on AtomVM.
+    alias_parts =
+      alias
+      |> Atom.to_string()
+      |> then(fn
+        <<"Elixir.", rest::binary>> -> rest
+        other -> other
+      end)
+      |> Phoenix.Binary.split(".")
+
+    controller_name =
+      controller
+      |> Atom.to_string()
+      |> then(fn
+        <<"Elixir.", rest::binary>> -> rest
+        other -> other
+      end)
+      |> Phoenix.Binary.split(".")
+      |> List.last()
+
+    ("Elixir." <> Enum.join(alias_parts ++ [controller_name], "."))
+    |> :erlang.binary_to_atom(:utf8)
   end
 
   defp match_path(pattern, path) do
-    pattern_parts = String.split(pattern, "/", trim: true)
-    path_parts = String.split(path, "/", trim: true)
+    pattern_parts = Phoenix.Binary.split_trim(pattern, "/")
+    path_parts = Phoenix.Binary.split_trim(path, "/")
 
     if length(pattern_parts) == length(path_parts) do
-      Enum.zip(pattern_parts, path_parts)
-      |> Enum.reduce_while({:ok, %{}}, fn
-        {":" <> key, value}, {:ok, acc} ->
-          {:cont, {:ok, Map.put(acc, key, value)}}
-
-        {same, same}, acc ->
-          {:cont, acc}
-
-        _, _ ->
-          {:halt, :error}
-      end)
+      match_parts(zip_parts(pattern_parts, path_parts), %{})
     else
       :error
     end
   end
+
+  # AtomVM Enum lacks zip/2 and reduce_while/3.
+  defp zip_parts([a | as], [b | bs]), do: [{a, b} | zip_parts(as, bs)]
+  defp zip_parts([], []), do: []
+  defp zip_parts(_, _), do: []
+
+  defp match_parts([{":" <> key, value} | rest], acc) do
+    match_parts(rest, Map.put(acc, key, value))
+  end
+
+  defp match_parts([{same, same} | rest], acc) do
+    match_parts(rest, acc)
+  end
+
+  defp match_parts([_ | _], _acc), do: :error
+  defp match_parts([], acc), do: {:ok, acc}
 
   defp resolve_controller(controller, conn) do
     Map.get(conn.private, :phoenix_router_controller) || controller

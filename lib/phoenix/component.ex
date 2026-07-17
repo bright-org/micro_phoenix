@@ -38,7 +38,7 @@ defmodule Phoenix.Component do
   end
 
   def assign(assigns, key, value) when is_binary(key) do
-    Map.put(assigns, String.to_existing_atom(key), value)
+    Map.put(assigns, :erlang.binary_to_existing_atom(key, :utf8), value)
   end
 
   def assign(assigns, attrs) when is_map(attrs) or is_list(attrs) do
@@ -61,21 +61,38 @@ defmodule Phoenix.Component do
     end
   end
 
-  def render_slot(nil), do: ""
+  # Match Phoenix.Component: empty slots return nil so `:if={msg = render_slot(...) || ...}` works.
+  def render_slot(nil), do: nil
+  def render_slot([]), do: nil
+  def render_slot(""), do: nil
   def render_slot(slot) when is_binary(slot), do: slot
-  def render_slot(slot) when is_function(slot, 1), do: slot.(%{})
-  def render_slot(%{inner_block: fun}) when is_function(fun), do: fun.(%{})
-  def render_slot([%{inner_block: fun} | _]) when is_function(fun), do: fun.(%{})
-  def render_slot([]), do: ""
-  def render_slot(_), do: ""
+  def render_slot(slot) when is_function(slot, 1), do: blank_to_nil(slot.(%{}))
+  def render_slot(%{inner_block: fun}) when is_function(fun), do: blank_to_nil(fun.(%{}))
+  def render_slot([%{inner_block: fun} | _]) when is_function(fun), do: blank_to_nil(fun.(%{}))
+  def render_slot(_), do: nil
 
-  def render_slot(nil, _arg), do: ""
+  def render_slot(nil, _arg), do: nil
+  def render_slot([], _), do: nil
+  def render_slot("", _), do: nil
   def render_slot(slot, _arg) when is_binary(slot), do: slot
-  def render_slot(slot, arg) when is_function(slot, 1), do: slot.(arg)
-  def render_slot(%{inner_block: fun}, arg) when is_function(fun), do: fun.(arg)
-  def render_slot([%{inner_block: fun} | _], arg) when is_function(fun), do: fun.(arg)
-  def render_slot([], _), do: ""
-  def render_slot(_, _), do: ""
+  def render_slot(slot, arg) when is_function(slot, 1), do: blank_to_nil(slot.(arg))
+  def render_slot(%{inner_block: fun}, arg) when is_function(fun), do: blank_to_nil(fun.(arg))
+  def render_slot([%{inner_block: fun} | _], arg) when is_function(fun), do: blank_to_nil(fun.(arg))
+  def render_slot(_, _), do: nil
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil({:safe, data}) do
+    case iodata_empty?(data) do
+      true -> nil
+      false -> {:safe, data}
+    end
+  end
+  defp blank_to_nil(other), do: other
+
+  defp iodata_empty?(data) when data in ["", []], do: true
+  defp iodata_empty?(data) when is_list(data), do: Enum.all?(data, &iodata_empty?/1)
+  defp iodata_empty?(_), do: false
 
   def to_form(data, opts \\ [])
 
@@ -99,25 +116,11 @@ defmodule Phoenix.Component do
     class = Map.get(assigns, :class)
     method = Map.get(assigns, :method) || Map.get(assigns[:rest] || %{}, :method)
     rest = Map.get(assigns, :rest, %{})
+    method = if method, do: method |> to_string() |> Phoenix.Binary.downcase_ascii()
 
     class_attr =
       if class do
         [" class=\"", Phoenix.Template.__class_list__(List.wrap(class)), "\""]
-      else
-        ""
-      end
-
-    method_attrs =
-      if method && to_string(method) != "get" do
-        [
-          " data-method=\"",
-          Phoenix.HTML.html_escape(to_string(method)),
-          "\" data-to=\"",
-          Phoenix.HTML.html_escape(to_string(href)),
-          "\" data-csrf=\"",
-          Phoenix.HTML.html_escape(csrf_token()),
-          "\""
-        ]
       else
         ""
       end
@@ -133,25 +136,47 @@ defmodule Phoenix.Component do
 
     body = Map.get(assigns, :inner_block) |> render_slot()
 
-    {:safe,
-     [
-       "<a href=\"",
-       Phoenix.HTML.html_escape(to_string(href)),
-       "\"",
-       class_attr,
-       method_attrs,
-       confirm_attr,
-       ">",
-       body,
-       "</a>"
-     ]}
+    if method && method != "get" do
+      # No Phoenix JS is available on AtomVM, so data-method links must work as plain HTML.
+      {:safe,
+       [
+         "<form action=\"",
+         Phoenix.HTML.html_escape(to_string(href)),
+         "\" method=\"post\" style=\"display:inline\">",
+         "<input type=\"hidden\" name=\"_method\" value=\"",
+         Phoenix.HTML.html_escape(method),
+         "\">",
+         "<input type=\"hidden\" name=\"_csrf_token\" value=\"",
+         Phoenix.HTML.html_escape(csrf_token()),
+         "\">",
+         "<button type=\"submit\"",
+         class_attr,
+         confirm_attr,
+         " style=\"background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer\">",
+         body,
+         "</button>",
+         "</form>"
+       ]}
+    else
+      {:safe,
+       [
+         "<a href=\"",
+         Phoenix.HTML.html_escape(to_string(href)),
+         "\"",
+         class_attr,
+         confirm_attr,
+         ">",
+         body,
+         "</a>"
+       ]}
+    end
   end
 
   def form(assigns) do
     form = to_form(assigns[:for], form_opts(assigns))
     action = assigns[:action] || "#"
     method = assigns[:method] || form.options[:method] || "post"
-    method = method |> to_string() |> String.downcase()
+    method = method |> to_string() |> Phoenix.Binary.downcase_ascii()
 
     {browser_method, method_override} =
       cond do
@@ -212,13 +237,5 @@ defmodule Phoenix.Component do
   defp maybe_put_opt(opts, _key, nil), do: opts
   defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp csrf_token do
-    if function_exported?(Plug.CSRFProtection, :get_csrf_token, 0) do
-      Plug.CSRFProtection.get_csrf_token()
-    else
-      ""
-    end
-  rescue
-    _ -> ""
-  end
+  defp csrf_token, do: "atomvm"
 end

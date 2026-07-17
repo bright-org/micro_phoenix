@@ -17,4 +17,10 @@ defmodule Phoenix.CodeReloader do
 
   @impl GenServer
   def init(_opts), do: {:ok, %{}}
+
+  # Mix `listeners: [Phoenix.CodeReloader]` sends compile notifications.
+  # AtomVM stub: ignore them (no live reload).
+  @impl GenServer
+  def handle_info({:modules_compiled, _info}, state), do: {:noreply, state}
+  def handle_info(_msg, state), do: {:noreply, state}
 end
