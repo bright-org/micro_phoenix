@@ -51,11 +51,26 @@ defmodule MicroPhoenix.Response do
 
   defp title_case("location"), do: "Location"
   defp title_case("set-cookie"), do: "Set-Cookie"
-  defp title_case(key), do: String.capitalize(key)
+  defp title_case(<<c, rest::binary>>), do: Phoenix.Binary.upcase_ascii(<<c>>) <> rest
 
   defp status_line(200), do: "HTTP/1.1 200 OK"
   defp status_line(302), do: "HTTP/1.1 302 Found"
   defp status_line(404), do: "HTTP/1.1 404 Not Found"
   defp status_line(405), do: "HTTP/1.1 405 Method Not Allowed"
-  defp status_line(code), do: "HTTP/1.1 #{code}"
+  defp status_line(code), do: "HTTP/1.1 " <> integer_to_binary(code)
+
+  defp integer_to_binary(n) when is_integer(n) and n >= 0 do
+    if n == 0 do
+      "0"
+    else
+      integer_to_binary(n, <<>>)
+    end
+  end
+
+  defp integer_to_binary(0, acc), do: acc
+
+  defp integer_to_binary(n, acc) when n > 0 do
+    digit = rem(n, 10)
+    integer_to_binary(div(n, 10), <<digit + ?0>> <> acc)
+  end
 end

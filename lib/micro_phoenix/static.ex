@@ -28,7 +28,10 @@ defmodule MicroPhoenix.Static do
   def get_error_page(status), do: {:error, status}
 
   defp normalize_path("/"), do: "index.html"
-  defp normalize_path(path), do: String.trim_leading(path, "/")
+  defp normalize_path(path), do: trim_leading_slash(path)
+
+  defp trim_leading_slash(<<"/", rest::binary>>), do: trim_leading_slash(rest)
+  defp trim_leading_slash(path), do: path
 
   defp read_file(relative) do
     root = Application.get_env(:micro_phoenix, :static_root, "priv/static")
@@ -43,7 +46,7 @@ defmodule MicroPhoenix.Static do
   defp content_type(path) do
     path
     |> Path.extname()
-    |> String.downcase()
+    |> Phoenix.Binary.downcase_ascii()
     |> then(&Map.get(@mimes, &1, "application/octet-stream"))
   end
 end
