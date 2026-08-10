@@ -21,6 +21,12 @@ defmodule MicroPhoenix do
   @parse_exception 0xE710112F
   @route_start 0xE7101130
   @route_ok 0xE7101131
+  @route_fetch_router_enter 0xE7101137
+  @route_fetch_router_ok_fn 0xE7101138
+  @route_fetch_router_ok_mfa 0xE7101139
+  @route_call_enter 0xE710113A
+  @route_call_returned 0xE710113B
+  @route_fetch_router_error 0xE710113C
   @build_start 0xE7101140
   @build_ok 0xE7101141
   @build_exception 0xE710114F
@@ -106,14 +112,25 @@ defmodule MicroPhoenix do
   end
 
   defp route(request) do
+    mark(@route_fetch_router_enter)
+
     case MicroPhoenix.Registry.fetch_router() do
       {:ok, route_fn} when is_function(route_fn, 1) ->
-        route_fn.(request)
+        mark(@route_fetch_router_ok_fn)
+        mark(@route_call_enter)
+        routed = route_fn.(request)
+        mark(@route_call_returned)
+        routed
 
       {:ok, {module, function}} ->
-        apply(module, function, [request])
+        mark(@route_fetch_router_ok_mfa)
+        mark(@route_call_enter)
+        routed = apply(module, function, [request])
+        mark(@route_call_returned)
+        routed
 
       :error ->
+        mark(@route_fetch_router_error)
         {:error, 404}
     end
   end
