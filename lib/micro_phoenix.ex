@@ -16,6 +16,9 @@ defmodule MicroPhoenix do
   @client_done_send_partial_ok 0xE7101111
   @client_done_send_error 0xE7101112
   @client_done_send_unexpected 0xE7101113
+  @fast_response_index 0xE7101114
+  @fast_response_index_html 0xE7101115
+  @fast_response_miss 0xE7101116
   @parse_start 0xE7101120
   @parse_ok 0xE7101121
   @parse_exception 0xE710112F
@@ -37,6 +40,7 @@ defmodule MicroPhoenix do
   @listen_failed 0xE71011F0
   @listen_exception 0xE71011F1
   @client_exception 0xE71011F2
+  @index_fast_response "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 18\r\nConnection: close\r\n\r\nHello from AtomVM\n"
 
   def start do
     mark(@listen_start)
@@ -84,14 +88,22 @@ defmodule MicroPhoenix do
         {:ok, data} ->
           mark(@recv_ok)
 
-          case response_for(data) do
+          case fast_response_for(data) do
             {:ok, response} ->
               mark(@send_start)
               send_status = send_response(socket, response)
               mark_client_done(send_status)
 
             :error ->
-              :ok
+              case response_for(data) do
+                {:ok, response} ->
+                  mark(@send_start)
+                  send_status = send_response(socket, response)
+                  mark_client_done(send_status)
+
+                :error ->
+                  :ok
+              end
           end
 
           close_socket(socket, false)
@@ -109,6 +121,21 @@ defmodule MicroPhoenix do
         mark(@client_exception)
         close_socket(socket, false)
     end
+  end
+
+  defp fast_response_for(<<"GET / HTTP/1.", _rest::binary>>) do
+    mark(@fast_response_index)
+    {:ok, @index_fast_response}
+  end
+
+  defp fast_response_for(<<"GET /index.html HTTP/1.", _rest::binary>>) do
+    mark(@fast_response_index_html)
+    {:ok, @index_fast_response}
+  end
+
+  defp fast_response_for(_data) do
+    mark(@fast_response_miss)
+    :error
   end
 
   defp route(request) do
