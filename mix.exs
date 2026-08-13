@@ -30,6 +30,8 @@ defmodule MicroPhoenix.MixProject do
       # AtomVM-oriented fork (app name remains :phoenix_html)
       {:phoenix_html,
        git: "https://github.com/bright-org/micro_phoenix_html.git", branch: "main"},
+      # AtomVM-oriented fork of elixir-gettext/gettext (app name remains :gettext)
+      {:gettext, git: "https://github.com/bright-org/gettext.git", branch: "main"},
       {:exatomvm, git: "https://github.com/atomvm/ExAtomVM/"}
     ]
   end
