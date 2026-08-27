@@ -61,11 +61,32 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Run do
 
     Mix.shell().info("Starting AtomVM with #{app_avm}")
 
+    # AtomVM linked with a custom MbedTLS needs this at runtime (SCRAM/crypto).
+    env =
+      case System.get_env("LD_LIBRARY_PATH") do
+        nil -> [{"LD_LIBRARY_PATH", System.get_env("ATOMVM_MBEDTLS_LIBDIR") || ""}]
+        path -> [{"LD_LIBRARY_PATH", path}]
+      end
+
+    env =
+      case System.get_env("ATOMVM_MBEDTLS_LIBDIR") do
+        nil -> env
+        dir ->
+          path =
+            case List.keyfind(env, "LD_LIBRARY_PATH", 0) do
+              {_, ""} -> dir
+              {_, existing} -> dir <> ":" <> existing
+            end
+
+          List.keystore(env, "LD_LIBRARY_PATH", 0, {"LD_LIBRARY_PATH", path})
+      end
+
     System.cmd(
       atomvm,
       [app_avm, atomvmlib, estdlib, exavmlib],
       into: IO.stream(:stdio, :line),
-      cd: root
+      cd: root,
+      env: Enum.into(env, System.get_env())
     )
   end
 end
