@@ -45,10 +45,18 @@ defmodule Phoenix.AtomVM do
       ensure_repo_started(repo, repo_config)
     end
 
-    case :gen_tcp.listen(port, [:binary, {:active, false}, {:reuseaddr, true}, {:packet, :raw}]) do
+    case listen_socket(port) do
       {:ok, sock} ->
         IO.puts("AtomVM Phoenix listening on http://localhost:#{port}/")
         accept_loop(sock, router, static)
+
+      {:error, :eaddrinuse} ->
+        :erlang.display({:listen_failed, :eaddrinuse, port})
+        IO.puts(
+          "error: port #{port} already in use. Stop the other process (e.g. pkill -f AtomVM) and retry."
+        )
+
+        :error
 
       {:error, {:bind, 98}} ->
         :erlang.display({:listen_failed, :eaddrinuse, port})
@@ -62,6 +70,15 @@ defmodule Phoenix.AtomVM do
         :erlang.display({:listen_failed, reason, port})
         IO.puts("error: failed to listen on port #{port}: #{inspect(reason)}")
         :error
+    end
+  end
+
+  defp listen_socket(port) do
+    with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
+         :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
+         :ok <- :socket.bind(socket, %{family: :inet, port: port, addr: :any}),
+         :ok <- :socket.listen(socket) do
+      {:ok, socket}
     end
   end
 
@@ -96,7 +113,7 @@ defmodule Phoenix.AtomVM do
   end
 
   defp accept_loop(listen_sock, router, static) do
-    case :gen_tcp.accept(listen_sock) do
+    case :socket.accept(listen_sock) do
       {:ok, client} ->
         spawn(fn -> handle_client(client, router, static) end)
         accept_loop(listen_sock, router, static)
@@ -117,36 +134,40 @@ defmodule Phoenix.AtomVM do
 
               error ->
                 :erlang.display({:dispatch_failed, error})
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
+                http_error(500, "Internal Server Error")
             end
-          catch
-            {:ecto_no_results, _queryable, _id} ->
-              "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found"
-
-            kind, reason ->
-              :erlang.display({:handle_client_catch, kind, reason})
-              "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
           rescue
+            # Match phoenix_ecto Plug.Exception mapping (Ecto.NoResultsError -> 404).
+            _e in Ecto.NoResultsError ->
+              http_error(404, "Not Found")
+
+            _e in Ecto.CastError ->
+              http_error(400, "Bad Request")
+
             e ->
               :erlang.display({:handle_client_error, e, __STACKTRACE__})
-              "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
+              http_error(500, "Internal Server Error")
+          catch
+            kind, reason ->
+              :erlang.display({:handle_client_catch, kind, reason})
+              http_error(500, "Internal Server Error")
           end
 
-        :gen_tcp.send(socket, response)
-        :gen_tcp.close(socket)
+        _ = socket_send(socket, response)
+        _ = :socket.close(socket)
 
       {:error, reason} ->
         :erlang.display({:recv_failed, reason})
-        :gen_tcp.close(socket)
+        _ = :socket.close(socket)
     end
   rescue
     e ->
       :erlang.display({:handle_client_outer_error, e})
-      :gen_tcp.close(socket)
+      _ = :socket.close(socket)
   catch
     kind, reason ->
       :erlang.display({:handle_client_outer_catch, kind, reason})
-      :gen_tcp.close(socket)
+      _ = :socket.close(socket)
   end
 
   defp recv_http_request(socket), do: recv_http_request(socket, <<>>)
@@ -165,18 +186,41 @@ defmodule Phoenix.AtomVM do
             {:ok, header_part <> "\r\n\r\n" <> binary_part(body, 0, content_length)}
 
           true ->
-            case :gen_tcp.recv(socket, 0, @recv_timeout) do
+            case :socket.recv(socket, 0, @recv_timeout) do
               {:ok, chunk} -> recv_http_request(socket, acc <> chunk)
               {:error, reason} -> {:error, reason}
             end
         end
 
       [_] ->
-        case :gen_tcp.recv(socket, 0, @recv_timeout) do
+        case :socket.recv(socket, 0, @recv_timeout) do
           {:ok, chunk} -> recv_http_request(socket, acc <> chunk)
           {:error, reason} -> {:error, reason}
         end
     end
+  end
+
+  defp socket_send(socket, data) when is_binary(data) do
+    case :socket.send(socket, data) do
+      :ok -> :ok
+      {:ok, <<>>} -> :ok
+      {:ok, rest} -> socket_send(socket, rest)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp socket_send(socket, data), do: socket_send(socket, IO.iodata_to_binary(data))
+
+  defp http_error(status, body) when is_integer(status) and is_binary(body) do
+    reason =
+      case status do
+        400 -> "Bad Request"
+        404 -> "Not Found"
+        500 -> "Internal Server Error"
+        _ -> "Error"
+      end
+
+    "HTTP/1.1 #{status} #{reason}\r\nContent-Length: #{byte_size(body)}\r\n\r\n" <> body
   end
 
   defp content_length_from_headers(header_part) do
