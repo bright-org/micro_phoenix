@@ -127,6 +127,13 @@ defmodule Phoenix.Endpoint.Server do
         _ -> _ = socket_send(socket, encode_raw(500, "Internal Server Error"))
       end
     rescue
+      # Match phoenix_ecto Plug.Exception mapping (Ecto.NoResultsError -> 404).
+      _e in Ecto.NoResultsError ->
+        _ = socket_send(socket, encode_raw(404, "Not Found"))
+
+      _e in Ecto.CastError ->
+        _ = socket_send(socket, encode_raw(400, "Bad Request"))
+
       e ->
         IO.puts(:stderr, Exception.format(:error, e, __STACKTRACE__))
         _ = socket_send(socket, encode_raw(500, "Internal Server Error"))

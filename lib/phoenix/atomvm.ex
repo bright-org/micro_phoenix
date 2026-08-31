@@ -134,19 +134,23 @@ defmodule Phoenix.AtomVM do
 
               error ->
                 :erlang.display({:dispatch_failed, error})
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
+                http_error(500, "Internal Server Error")
             end
           rescue
+            # Match phoenix_ecto Plug.Exception mapping (Ecto.NoResultsError -> 404).
+            _e in Ecto.NoResultsError ->
+              http_error(404, "Not Found")
+
+            _e in Ecto.CastError ->
+              http_error(400, "Bad Request")
+
             e ->
               :erlang.display({:handle_client_error, e, __STACKTRACE__})
-              "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
+              http_error(500, "Internal Server Error")
           catch
-            {:ecto_no_results, _queryable, _id} ->
-              "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found"
-
             kind, reason ->
               :erlang.display({:handle_client_catch, kind, reason})
-              "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
+              http_error(500, "Internal Server Error")
           end
 
         _ = socket_send(socket, response)
@@ -206,6 +210,18 @@ defmodule Phoenix.AtomVM do
   end
 
   defp socket_send(socket, data), do: socket_send(socket, IO.iodata_to_binary(data))
+
+  defp http_error(status, body) when is_integer(status) and is_binary(body) do
+    reason =
+      case status do
+        400 -> "Bad Request"
+        404 -> "Not Found"
+        500 -> "Internal Server Error"
+        _ -> "Error"
+      end
+
+    "HTTP/1.1 #{status} #{reason}\r\nContent-Length: #{byte_size(body)}\r\n\r\n" <> body
+  end
 
   defp content_length_from_headers(header_part) do
     content_length_from_lines(:binary.split(header_part, "\r\n", [:global]))
