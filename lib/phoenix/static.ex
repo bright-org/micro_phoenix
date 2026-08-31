@@ -1,7 +1,7 @@
 defmodule Phoenix.Static do
   @moduledoc false
 
-  # Minimal static file server for AtomVM / gen_tcp dispatch.
+  # Minimal static file server for AtomVM / :socket dispatch.
   # Reads packed priv via `:atomvm.read_priv/2`.
 
   @mimes %{

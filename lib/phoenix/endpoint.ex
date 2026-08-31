@@ -90,8 +90,7 @@ defmodule Phoenix.Endpoint.Server do
     plug = Keyword.fetch!(opts, :plug)
     port = Keyword.get(opts, :port, 8080)
 
-    {:ok, listen_sock} =
-      :gen_tcp.listen(port, [:binary, active: false, reuseaddr: true, packet: :raw])
+    {:ok, listen_sock} = listen_socket(port)
 
     state = %{listen_sock: listen_sock, plug: plug, port: port}
     spawn_link(fn -> accept_loop(state) end)
@@ -99,8 +98,17 @@ defmodule Phoenix.Endpoint.Server do
     {:ok, state}
   end
 
+  defp listen_socket(port) do
+    with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
+         :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
+         :ok <- :socket.bind(socket, %{family: :inet, port: port, addr: :any}),
+         :ok <- :socket.listen(socket) do
+      {:ok, socket}
+    end
+  end
+
   defp accept_loop(%{listen_sock: listen_sock, plug: {endpoint, endpoint_opts}} = state) do
-    case :gen_tcp.accept(listen_sock) do
+    case :socket.accept(listen_sock) do
       {:ok, client} ->
         spawn(fn -> serve(client, endpoint, endpoint_opts) end)
         accept_loop(state)
@@ -112,20 +120,31 @@ defmodule Phoenix.Endpoint.Server do
 
   defp serve(socket, endpoint, endpoint_opts) do
     try do
-      with {:ok, data} <- :gen_tcp.recv(socket, 0),
+      with {:ok, data} <- :socket.recv(socket, 0),
            {:ok, response} <- dispatch(data, endpoint, endpoint_opts) do
-        :gen_tcp.send(socket, response)
+        _ = socket_send(socket, response)
       else
-        _ -> :gen_tcp.send(socket, encode_raw(500, "Internal Server Error"))
+        _ -> _ = socket_send(socket, encode_raw(500, "Internal Server Error"))
       end
     rescue
       e ->
         IO.puts(:stderr, Exception.format(:error, e, __STACKTRACE__))
-        :gen_tcp.send(socket, encode_raw(500, "Internal Server Error"))
+        _ = socket_send(socket, encode_raw(500, "Internal Server Error"))
     after
-      :gen_tcp.close(socket)
+      _ = :socket.close(socket)
     end
   end
+
+  defp socket_send(socket, data) when is_binary(data) do
+    case :socket.send(socket, data) do
+      :ok -> :ok
+      {:ok, <<>>} -> :ok
+      {:ok, rest} -> socket_send(socket, rest)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp socket_send(socket, data), do: socket_send(socket, IO.iodata_to_binary(data))
 
   @doc false
   def dispatch(data, endpoint, endpoint_opts \\ []) when is_binary(data) do
