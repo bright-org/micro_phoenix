@@ -16,6 +16,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
     write_map_avm!()
     write_erlang_application_avm!()
     write_elixir_stdlib_avm!()
+    write_calendar_avm!()
     :ok
   end
 
@@ -34,6 +35,8 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
       def get_env(:postgrex, :type_server_timeout), do: 60_000
       def get_env(:postgrex, :type_server_reap_after), do: 180_000
       def get_env(:postgrex, :json_library), do: Jason
+      def get_env(:gettext, :default_locale), do: "en"
+      def get_env(:gettext, :default_domain), do: "default"
       def get_env(_app, _key), do: nil
       def get_env(app, key, default), do: get_env(app, key) || default
 
@@ -438,6 +441,19 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
         end
 
         @doc false
+        @spec zip(t, t) :: list
+        def zip(list1, list2) when is_list(list1) and is_list(list2) do
+          zip_lists(list1, list2)
+        end
+
+        def zip(enumerable1, enumerable2) do
+          zip_lists(to_list(enumerable1), to_list(enumerable2))
+        end
+
+        defp zip_lists([a | as], [b | bs]), do: [{a, b} | zip_lists(as, bs)]
+        defp zip_lists(_, _), do: []
+
+        @doc false
         def map_intersperse(enumerable, separator, mapper) when is_list(enumerable) do
           map_intersperse_list(enumerable, separator, mapper)
         end
@@ -451,6 +467,19 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
 
         defp map_intersperse_list([h | t], separator, mapper) do
           [mapper.(h), separator | map_intersperse_list(t, separator, mapper)]
+        end
+
+        @doc false
+        @spec sort_by(t, (element -> any)) :: list
+        def sort_by(enumerable, mapper) when is_function(mapper, 1) do
+          mapped =
+            Enum.map(enumerable, fn entry ->
+              {mapper.(entry), entry}
+            end)
+
+          # Prefer :lists.sort/2 over :lists.keysort/2 (ExAtomVM may warn on keysort).
+          sorted = :lists.sort(fn {a, _}, {b, _} -> a <= b end, mapped)
+          Enum.map(sorted, fn {_key, entry} -> entry end)
         end
       """
 
@@ -497,7 +526,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
     end
   end
 
-  # AtomVM Map lacks update!/3 (used via put_in in Ecto.Query.Planner).
+  # AtomVM Map lacks update!/3 and drop/2 (Ecto.Query.Planner / Changeset).
   defp write_map_avm! do
     out = Path.expand("avm_deps/elixir_map.avm")
     compile_path = Mix.Project.compile_path()
@@ -513,7 +542,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
       |> Enum.find(&File.exists?/1)
 
     unless map_src do
-      Mix.shell().error("AtomVM Map.ex not found; skipping Map.update! stub")
+      Mix.shell().error("AtomVM Map.ex not found; skipping Map.update!/drop stub")
       :ok
     else
       source = File.read!(map_src)
@@ -527,6 +556,25 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
             %{} -> :erlang.error({:badkey, key}, [map, key])
           end
         end
+
+        @doc false
+        def drop(%{} = map, keys) when is_list(keys) do
+          :lists.foldl(fn key, acc -> :maps.remove(key, acc) end, map, keys)
+        end
+
+        @doc false
+        def take(%{} = map, keys) when is_list(keys) do
+          :lists.foldl(
+            fn key, acc ->
+              case :maps.find(key, map) do
+                {:ok, value} -> :maps.put(key, value, acc)
+                :error -> acc
+              end
+            end,
+            %{},
+            keys
+          )
+        end
       """
 
       patched =
@@ -538,7 +586,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
         )
 
       if patched == source do
-        Mix.shell().error("Failed to patch AtomVM Map.ex for update!; skipping")
+        Mix.shell().error("Failed to patch AtomVM Map.ex for update!/drop; skipping")
         :ok
       else
         File.write!(stub_ex, patched)
@@ -563,7 +611,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
         else
           ExAtomVM.PackBEAM.make_avm([{beam_path, :beam}], out)
           File.cp!(beam_path, Path.join(compile_path, "Elixir.Map.beam"))
-          Mix.shell().info("Wrote AtomVM Map.update! stub -> #{out} (and app ebin)")
+          Mix.shell().info("Wrote AtomVM Map.update!/drop stub -> #{out} (and app ebin)")
           File.rm(beam_path)
           File.rm(stub_ex)
           :ok
@@ -664,6 +712,17 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
         end
       end
 
+      # Ecto.Type.trim/2 uses String.trim_leading/1 for cast.
+      def trim_leading(subject) when is_binary(subject) do
+        trim_leading_ws(subject)
+      end
+
+      defp trim_leading_ws(<<" ", rest::binary>>), do: trim_leading_ws(rest)
+      defp trim_leading_ws(<<"\\t", rest::binary>>), do: trim_leading_ws(rest)
+      defp trim_leading_ws(<<"\\n", rest::binary>>), do: trim_leading_ws(rest)
+      defp trim_leading_ws(<<"\\r", rest::binary>>), do: trim_leading_ws(rest)
+      defp trim_leading_ws(other), do: other
+
       def trim_trailing(subject, trailing)
           when is_binary(subject) and is_binary(trailing) do
         trim_trailing_loop(subject, trailing)
@@ -713,6 +772,227 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
     File.rm(string_beam)
     File.rm(string_ex)
     :ok
+  end
+
+  # Posts timestamps need NaiveDateTime/DateTime; AtomVM ships neither.
+  defp write_calendar_avm! do
+    out = Path.expand("avm_deps/elixir_calendar.avm")
+    compile_path = Mix.Project.compile_path()
+    stub_ex = Path.join(System.tmp_dir!(), "calendar_atomvm_stub.ex")
+
+    File.write!(stub_ex, """
+    defmodule Calendar.ISO do
+      @moduledoc false
+      @compile {:autoload, false}
+    end
+
+    defmodule Calendar do
+      @moduledoc false
+      @compile {:autoload, false}
+    end
+
+    defmodule NaiveDateTime do
+      @moduledoc false
+      @compile {:autoload, false}
+
+      defstruct year: 0,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                microsecond: {0, 0},
+                calendar: Calendar.ISO
+
+      def to_gregorian_seconds(
+            %{
+              year: y,
+              month: m,
+              day: d,
+              hour: h,
+              minute: min,
+              second: s,
+              microsecond: {us, _}
+            }
+          ) do
+        # Accept NaiveDateTime and DateTime maps — Postgrex.Extensions.Timestamp
+        # passes either into this helper.
+        secs = :calendar.datetime_to_gregorian_seconds({{y, m, d}, {h, min, s}})
+        {secs, us}
+      end
+
+      def from_gregorian_seconds(seconds, {microsecond, precision} \\\\ {0, 0})
+          when is_integer(seconds) do
+        {date, time} = gregorian_seconds_to_datetime(seconds)
+
+        %NaiveDateTime{
+          year: elem(date, 0),
+          month: elem(date, 1),
+          day: elem(date, 2),
+          hour: elem(time, 0),
+          minute: elem(time, 1),
+          second: elem(time, 2),
+          microsecond: {microsecond, precision},
+          calendar: Calendar.ISO
+        }
+      end
+
+      def utc_now do
+        # AtomVM accepts only atom time units (not integer multipliers like 1000).
+        {{y, mo, d}, {h, mi, s}} = :erlang.universaltime()
+
+        %NaiveDateTime{
+          year: y,
+          month: mo,
+          day: d,
+          hour: h,
+          minute: mi,
+          second: s,
+          microsecond: {0, 6},
+          calendar: Calendar.ISO
+        }
+      end
+
+      defp gregorian_seconds_to_datetime(seconds) do
+        days = div(seconds, 86400)
+        rem_secs = rem(seconds, 86400)
+
+        {days, rem_secs} =
+          if rem_secs < 0 do
+            {days - 1, rem_secs + 86400}
+          else
+            {days, rem_secs}
+          end
+
+        {gregorian_days_to_date(days),
+         {div(rem_secs, 3600), rem(div(rem_secs, 60), 60), rem(rem_secs, 60)}}
+      end
+
+      # Inverse of AtomVM calendar:date_to_gregorian_days/3 (Hinnant civil_from_days).
+      defp gregorian_days_to_date(z) do
+        z = z - 60
+        era = if z >= 0, do: div(z, 146097), else: div(z - 146096, 146097)
+        doe = z - era * 146097
+        yoe = div(doe - div(doe, 1460) + div(doe, 36524) - div(doe, 146096), 365)
+        y = yoe + era * 400
+        doy = doe - (365 * yoe + div(yoe, 4) - div(yoe, 100))
+        mp = div(5 * doy + 2, 153)
+        d = doy - div(153 * mp + 2, 5) + 1
+        m = if mp < 10, do: mp + 3, else: mp - 9
+        y = if m <= 2, do: y + 1, else: y
+        {y, m, d}
+      end
+    end
+
+    defmodule DateTime do
+      @moduledoc false
+      @compile {:autoload, false}
+
+      defstruct year: 0,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                microsecond: {0, 0},
+                utc_offset: 0,
+                std_offset: 0,
+                time_zone: "Etc/UTC",
+                zone_abbr: "UTC",
+                calendar: Calendar.ISO
+
+      def from_gregorian_seconds(seconds, {microsecond, precision} \\\\ {0, 0})
+          when is_integer(seconds) do
+        ndt = NaiveDateTime.from_gregorian_seconds(seconds, {microsecond, precision})
+        from_naive!(ndt, "Etc/UTC")
+      end
+
+      def from_naive!(%NaiveDateTime{} = ndt, "Etc/UTC") do
+        %DateTime{
+          year: ndt.year,
+          month: ndt.month,
+          day: ndt.day,
+          hour: ndt.hour,
+          minute: ndt.minute,
+          second: ndt.second,
+          microsecond: ndt.microsecond,
+          utc_offset: 0,
+          std_offset: 0,
+          time_zone: "Etc/UTC",
+          zone_abbr: "UTC",
+          calendar: Calendar.ISO
+        }
+      end
+
+      def from_naive!(%NaiveDateTime{} = ndt, "UTC"), do: from_naive!(ndt, "Etc/UTC")
+
+      def utc_now do
+        from_naive!(NaiveDateTime.utc_now(), "Etc/UTC")
+      end
+
+      def to_unix(%DateTime{} = dt, unit) do
+        ndt = %NaiveDateTime{
+          year: dt.year,
+          month: dt.month,
+          day: dt.day,
+          hour: dt.hour,
+          minute: dt.minute,
+          second: dt.second,
+          microsecond: dt.microsecond,
+          calendar: Calendar.ISO
+        }
+
+        {secs, us} = NaiveDateTime.to_gregorian_seconds(ndt)
+        # Unix epoch is 62167219200 gregorian seconds.
+        unix_secs = secs - 62_167_219_200
+
+        case unit do
+          :second -> unix_secs
+          :millisecond -> unix_secs * 1_000 + div(us, 1_000)
+          :microsecond -> unix_secs * 1_000_000 + us
+          :nanosecond -> unix_secs * 1_000_000_000 + us * 1_000
+        end
+      end
+    end
+    """)
+
+    {output, status} =
+      System.cmd(
+        "elixir",
+        [
+          "-e",
+          """
+          Code.put_compiler_option(:ignore_module_conflict, true)
+          compiled = Code.compile_file(#{inspect(stub_ex)})
+          Enum.each(compiled, fn {mod, bytecode} ->
+            path = Path.join(#{inspect(System.tmp_dir!())}, Atom.to_string(mod) <> ".beam")
+            File.write!(path, bytecode)
+            IO.puts(path)
+          end)
+          """
+        ],
+        stderr_to_stdout: true
+      )
+
+    if status != 0 do
+      Mix.shell().error("Calendar stub compile failed:\n#{output}")
+      :ok
+    else
+      beams =
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&String.ends_with?(&1, ".beam"))
+        |> Enum.map(fn path ->
+          File.cp!(path, Path.join(compile_path, Path.basename(path)))
+          {path, :beam}
+        end)
+
+      ExAtomVM.PackBEAM.make_avm(beams, out)
+      Mix.shell().info("Wrote AtomVM Calendar stubs -> #{out} (and app ebin)")
+      Enum.each(beams, fn {path, _} -> File.rm(path) end)
+      File.rm(stub_ex)
+      :ok
+    end
   end
 
   defp compile_stub!(stub_ex, beam_path, module) do
