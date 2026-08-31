@@ -76,6 +76,13 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
     opts =
       [port: port, otp_app: otp_app]
       |> then(fn opts -> if repo, do: Keyword.put(opts, :repo, repo), else: opts end)
+      |> then(fn opts ->
+        if repo do
+          Keyword.put(opts, :repo_config, atomvm_repo_config(otp_app, repo))
+        else
+          opts
+        end
+      end)
 
     source = """
     defmodule #{inspect(@boot_module)} do
@@ -93,6 +100,27 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
     [{^boot_module, bytecode}] = Code.compile_string(source)
     File.write!(boot_beam_path(), bytecode)
     :ok
+  end
+
+  # Bake host Application env into Boot. AtomVM's Application stub has no get_env.
+  # Force TCP + single-connection options suitable for AtomVM Postgres.
+  defp atomvm_repo_config(otp_app, repo) do
+    Application.get_env(otp_app, repo, [])
+    |> Keyword.merge(
+      hostname: "127.0.0.1",
+      pool_size: 1,
+      ssl: false,
+      pool: DBConnection.SingleConnection,
+      migration_lock: false,
+      # Computed on the host Mix node — AtomVM lacks Module.split/Macro.underscore.
+      telemetry_prefix: telemetry_prefix(repo)
+    )
+  end
+
+  defp telemetry_prefix(repo) do
+    repo
+    |> Module.split()
+    |> Enum.map(&(&1 |> Macro.underscore() |> String.to_atom()))
   end
 
   defp boot_beam_path do

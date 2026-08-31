@@ -28,6 +28,7 @@ defmodule Phoenix.AtomVM do
     port = Keyword.get(opts, :port, 8080)
     repo = Keyword.get(opts, :repo)
     otp_app = Keyword.get(opts, :otp_app)
+    repo_config = Keyword.get(opts, :repo_config, [])
 
     static = Keyword.get(opts, :static, [])
     static = Keyword.put_new(static, :only, ~w(assets fonts images favicon.ico robots.txt))
@@ -39,7 +40,10 @@ defmodule Phoenix.AtomVM do
         static
       end
 
-    if repo, do: ensure_repo_started(repo)
+    if repo do
+      ensure_ecto_stack_started()
+      ensure_repo_started(repo, repo_config)
+    end
 
     case :gen_tcp.listen(port, [:binary, {:active, false}, {:reuseaddr, true}, {:packet, :raw}]) do
       {:ok, sock} ->
@@ -61,8 +65,26 @@ defmodule Phoenix.AtomVM do
     end
   end
 
-  defp ensure_repo_started(repo) do
-    case GenServer.start_link(repo, [], name: repo) do
+  defp ensure_ecto_stack_started do
+    Enum.each(
+      [
+        Ecto.Application,
+        DBConnection.App,
+        Postgrex.App,
+        Ecto.Adapters.SQL.Application
+      ],
+      fn mod ->
+        case mod.start(:normal, []) do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> :ok
+          other -> :erlang.display({:ecto_stack_start_failed, mod, other})
+        end
+      end
+    )
+  end
+
+  defp ensure_repo_started(repo, repo_config) do
+    case repo.start_link(repo_config) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _}} -> :ok
       other -> :erlang.display({:repo_start_failed, other})
@@ -106,7 +128,7 @@ defmodule Phoenix.AtomVM do
               "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
           rescue
             e ->
-              :erlang.display({:handle_client_error, e})
+              :erlang.display({:handle_client_error, e, __STACKTRACE__})
               "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error"
           end
 
