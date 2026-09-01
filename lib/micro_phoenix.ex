@@ -5,6 +5,7 @@ defmodule MicroPhoenix do
   @listen_ok 0xE7101102
   @accept_ok 0xE7101103
   @recv_wait 0xE7101104
+  @gen_tcp_socket_recv_return 0xE71011AC
   @recv_ok 0xE7101105
   @send_start 0xE7101106
   @send_ok 0xE7101107
@@ -86,6 +87,7 @@ defmodule MicroPhoenix do
 
       case :gen_tcp.recv(socket, 0) do
         {:ok, data} ->
+          mark(@gen_tcp_socket_recv_return)
           mark(@recv_ok)
 
           case fast_response_for(data) do
