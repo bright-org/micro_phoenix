@@ -6,7 +6,7 @@
     template_atom_assign_test/0,
     template_binary_assign_test/0,
     template_iolist_assign_test/0,
-    template_non_binary_assign_test/0
+    template_integer_assign_test/0
 ]).
 
 start() ->
@@ -52,12 +52,12 @@ template_iolist_assign_test() ->
         <<"Items: A,B">>
     ).
 
-template_non_binary_assign_test() ->
+template_integer_assign_test() ->
     assert_template(
-        non_binary_assign,
+        integer_assign,
         <<"Number: <%= @number %>">>,
         #{number => 123},
-        <<"Number: ">>
+        <<"Number: 123">>
     ).
 
 assert_template(Label, Template, Assigns, ExpectedBody) ->

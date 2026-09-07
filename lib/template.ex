@@ -1,113 +1,101 @@
 defmodule Template do
-
   def render(_conn, html, assigns \\ %{}) when is_binary(html) do
     {:ok, 200, "text/html", render_template(html, assigns)}
   end
 
   defp render_template(template, assigns) do
-    render_template(template, assigns, "")
+    render_template(template, assigns, <<>>)
   end
 
-  defp render_template("", _assigns, acc), do: acc
+  defp render_template(<<>>, _assigns, acc), do: acc
 
   defp render_template(template, assigns, acc) do
-    marker = "<%= @"
+    case :binary.match(template, "<%=") do
+      {start, tag_len} ->
+        before = binary_part(template, 0, start)
+        rest = binary_part(template, start + tag_len, byte_size(template) - start - tag_len)
 
-    case :binary.match(template, marker) do
-      :nomatch ->
-        acc <> template
+        case :binary.match(rest, "%>") do
+          {var_len, close_len} ->
+            var_name = binary_part(rest, 0, var_len) |> trim_ascii()
 
-      {start, marker_len} ->
-        before_marker = :binary.part(template, 0, start)
-        after_marker_pos = start + marker_len
-        after_marker = :binary.part(template, after_marker_pos, byte_size(template) - after_marker_pos)
+            after_tag =
+              binary_part(rest, var_len + close_len, byte_size(rest) - var_len - close_len)
 
-        case :binary.match(after_marker, "%>") do
+            value = lookup_assign(assigns, var_name)
+            render_template(after_tag, assigns, acc <> before <> value)
+
           :nomatch ->
             acc <> template
-
-          {finish, finish_len} ->
-            key =
-              after_marker
-              |> :binary.part(0, finish)
-              |> trim_ascii()
-
-            after_finish_pos = finish + finish_len
-            after_finish =
-              :binary.part(after_marker, after_finish_pos, byte_size(after_marker) - after_finish_pos)
-
-            render_template(after_finish, assigns, acc <> before_marker <> assign_value(assigns, key))
         end
+
+      :nomatch ->
+        acc <> template
     end
   end
 
-  defp assign_value(assigns, key) do
+  defp trim_ascii(bin) do
+    bin |> trim_leading_ascii() |> trim_trailing_ascii()
+  end
+
+  defp trim_leading_ascii(<<" ", rest::binary>>), do: trim_leading_ascii(rest)
+  defp trim_leading_ascii(<<"\t", rest::binary>>), do: trim_leading_ascii(rest)
+  defp trim_leading_ascii(<<"@", rest::binary>>), do: trim_leading_ascii(rest)
+  defp trim_leading_ascii(bin), do: bin
+
+  defp trim_trailing_ascii(bin) do
+    size = byte_size(bin)
+
+    if size > 0 and :binary.at(bin, size - 1) in [?\s, ?\t] do
+      trim_trailing_ascii(binary_part(bin, 0, size - 1))
+    else
+      bin
+    end
+  end
+
+  defp lookup_assign(assigns, var_name) do
     atom_key =
       try do
-        :erlang.binary_to_existing_atom(key, :utf8)
-      rescue
-        ArgumentError -> nil
+        :erlang.binary_to_existing_atom(var_name, :utf8)
       catch
-        _, _ -> nil
+        :error, :badarg -> nil
       end
 
-    case find_assign(assigns, atom_key, key) do
+    value =
+      cond do
+        atom_key != nil and Map.has_key?(assigns, atom_key) -> Map.get(assigns, atom_key)
+        Map.has_key?(assigns, var_name) -> Map.get(assigns, var_name)
+        true -> nil
+      end
+
+    case value do
       nil -> ""
-      v when is_list(v) -> :erlang.iolist_to_binary(v)
+      v when is_list(v) -> Enum.join(v, "")
       v when is_binary(v) -> v
+      v when is_integer(v) -> integer_to_binary(v)
+      v when is_atom(v) -> atom_to_binary(v)
       _ -> ""
     end
   end
 
-  defp find_assign(assigns, atom_key, key) do
-    case find_assign_key(assigns, atom_key) do
-      {:ok, value} ->
-        value
-
-      :error ->
-        case find_assign_key(assigns, key) do
-          {:ok, value} -> value
-          :error -> nil
-        end
+  defp integer_to_binary(n) when is_integer(n) do
+    if n == 0 do
+      "0"
+    else
+      integer_to_binary(n, <<>>)
     end
   end
 
-  defp find_assign_key(_assigns, nil), do: :error
+  defp integer_to_binary(0, acc), do: acc
 
-  defp find_assign_key(assigns, key) do
-    case :maps.find(key, assigns) do
-      {:ok, value} -> {:ok, value}
-      :error -> :error
-    end
-  catch
-    _, _ -> :error
+  defp integer_to_binary(n, acc) when n > 0 do
+    digit = rem(n, 10)
+    integer_to_binary(div(n, 10), <<digit + ?0>> <> acc)
   end
 
-  defp trim_ascii(value) do
-    value
-    |> trim_ascii_left()
-    |> trim_ascii_right()
+  defp atom_to_binary(atom) when is_atom(atom) do
+    :erlang.atom_to_binary(atom, :utf8)
+  rescue
+    _ -> ""
   end
-
-  defp trim_ascii_left(<<c, rest::binary>>) when c in [?\s, ?\t, ?\n, ?\r] do
-    trim_ascii_left(rest)
-  end
-
-  defp trim_ascii_left(value), do: value
-
-  defp trim_ascii_right(value) when byte_size(value) > 0 do
-    last_pos = byte_size(value) - 1
-
-    case :binary.at(value, last_pos) do
-      c when c in [?\s, ?\t, ?\n, ?\r] ->
-        value
-        |> :binary.part(0, last_pos)
-        |> trim_ascii_right()
-
-      _ ->
-        value
-    end
-  end
-
-  defp trim_ascii_right(value), do: value
 end

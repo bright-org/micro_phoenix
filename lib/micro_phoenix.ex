@@ -1,6 +1,6 @@
 defmodule MicroPhoenix do
   @port Application.compile_env(:micro_phoenix, :port, 8080)
-  @listen_options Application.compile_env(:micro_phoenix, :listen_options, [])
+  @server_name MicroPhoenix.Server
   @listen_start 0xE7101101
   @listen_ok 0xE7101102
   @accept_ok 0xE7101103
@@ -43,36 +43,81 @@ defmodule MicroPhoenix do
   @client_exception 0xE71011F2
   @index_fast_response "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 18\r\nConnection: close\r\n\r\nHello from AtomVM\n"
 
-  def start do
+  def child_spec(_opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, []}
+    }
+  end
+
+  def start() do
+    case run_server() do
+      {:ok, _pid} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def start_link() do
+    case Process.whereis(@server_name) do
+      nil -> start_server_process()
+      pid -> {:ok, pid}
+    end
+  end
+
+  defp start_server_process() do
+    parent = self()
+
+    pid =
+      spawn_link(fn ->
+        case run_server(parent) do
+          {:ok, _pid} -> :ok
+          {:error, reason} -> exit(reason)
+        end
+      end)
+
+    receive do
+      {:server_started, ^pid} -> {:ok, pid}
+    after
+      1_000 -> {:error, :timeout}
+    end
+  end
+
+  defp run_server(parent \\ self()) do
+    MicroPhoenix.Registry.ensure_started()
     mark(@listen_start)
 
     try do
-      case :gen_tcp.listen(@port, [
-             :binary,
-             {:active, false},
-             {:reuseaddr, true},
-             {:packet, :raw} | @listen_options
-           ]) do
-        {:ok, sock} ->
-          mark(@listen_ok)
-          accept_loop(sock)
-
-        {:error, _reason} ->
+      with true <- Process.register(self(), @server_name),
+           {:ok, socket} <- listen_socket() do
+        mark(@listen_ok)
+        send(parent, {:server_started, self()})
+        IO.puts("AtomVM HTTP Server listening on http://localhost:#{@port}/")
+        accept_loop(socket)
+      else
+        false ->
           mark(@listen_failed)
-          wait_forever()
+          {:error, :already_started}
+
+        {:error, reason} ->
+          mark(@listen_failed)
+          {:error, reason}
       end
-    catch
-      _, _ ->
+    rescue
+      error ->
         mark(@listen_exception)
-        wait_forever()
+        {:error, error}
+    catch
+      kind, reason ->
+        mark(@listen_exception)
+        {:error, {kind, reason}}
     end
   end
 
   defp accept_loop(listen_sock) do
-    case :gen_tcp.accept(listen_sock) do
+    case :socket.accept(listen_sock) do
       {:ok, client} ->
         mark(@accept_ok)
-        handle_client(client)
+        spawn(fn -> handle_client(client) end)
         accept_loop(listen_sock)
 
       {:error, _reason} ->
@@ -85,26 +130,21 @@ defmodule MicroPhoenix do
     try do
       mark(@recv_wait)
 
-      case :gen_tcp.recv(socket, 0) do
+      case :socket.recv(socket, 0) do
         {:ok, data} ->
+          # Keep the established app-side receive boundary marker while the
+          # transport moves from :gen_tcp to direct :socket calls.
           mark(@gen_tcp_socket_recv_return)
           mark(@recv_ok)
 
           case fast_response_for(data) do
             {:ok, response} ->
-              mark(@send_start)
-              send_status = send_response(socket, response)
-              mark_client_done(send_status)
+              send_and_mark(socket, response)
 
             :error ->
               case response_for(data) do
-                {:ok, response} ->
-                  mark(@send_start)
-                  send_status = send_response(socket, response)
-                  mark_client_done(send_status)
-
-                :error ->
-                  :ok
+                {:ok, response} -> send_and_mark(socket, response)
+                :error -> :ok
               end
           end
 
@@ -125,6 +165,11 @@ defmodule MicroPhoenix do
     end
   end
 
+  defp send_and_mark(socket, response) do
+    mark(@send_start)
+    socket |> send_response(response) |> mark_client_done()
+  end
+
   defp fast_response_for(<<"GET / HTTP/1.", _rest::binary>>) do
     mark(@fast_response_index)
     {:ok, @index_fast_response}
@@ -140,39 +185,12 @@ defmodule MicroPhoenix do
     :error
   end
 
-  defp route(request) do
-    mark(@route_fetch_router_enter)
-
-    case MicroPhoenix.Registry.fetch_router() do
-      {:ok, route_fn} when is_function(route_fn, 1) ->
-        mark(@route_fetch_router_ok_fn)
-        mark(@route_call_enter)
-        routed = route_fn.(request)
-        mark(@route_call_returned)
-        routed
-
-      {:ok, {module, function}} ->
-        mark(@route_fetch_router_ok_mfa)
-        mark(@route_call_enter)
-        routed = apply(module, function, [request])
-        mark(@route_call_returned)
-        routed
-
-      :error ->
-        mark(@route_fetch_router_error)
-        {:error, 404}
-    end
-  end
-
   defp response_for(data) do
     case parse_request(data) do
       {:ok, request} ->
         case route_request(request) do
-          {:ok, routed} ->
-            build_response(routed)
-
-          :error ->
-            :error
+          {:ok, routed} -> build_response(routed)
+          :error -> :error
         end
 
       :error ->
@@ -204,15 +222,33 @@ defmodule MicroPhoenix do
       mark(@route_ok)
       {:ok, routed}
     rescue
-      _ ->
-        # Preserve the last router/controller marker; otherwise this catch-all
-        # hides the exact route stage that raised on bare-metal AtomVM.
-        :error
+      _ -> :error
     catch
-      _, _ ->
-        # Preserve the last router/controller marker; otherwise this catch-all
-        # hides the exact route stage that raised on bare-metal AtomVM.
-        :error
+      _, _ -> :error
+    end
+  end
+
+  defp route(request) do
+    mark(@route_fetch_router_enter)
+
+    case MicroPhoenix.Registry.fetch_router() do
+      {:ok, route_fn} when is_function(route_fn, 1) ->
+        mark(@route_fetch_router_ok_fn)
+        mark(@route_call_enter)
+        routed = route_fn.(request)
+        mark(@route_call_returned)
+        routed
+
+      {:ok, {module, function}} ->
+        mark(@route_fetch_router_ok_mfa)
+        mark(@route_call_enter)
+        routed = apply(module, function, [request])
+        mark(@route_call_returned)
+        routed
+
+      :error ->
+        mark(@route_fetch_router_error)
+        {:error, 404}
     end
   end
 
@@ -235,8 +271,12 @@ defmodule MicroPhoenix do
   end
 
   defp send_response(socket, response) do
-    case :gen_tcp.send(socket, response) do
+    case :socket.send(socket, response) do
       :ok ->
+        mark(@send_ok)
+        :ok
+
+      {:ok, <<>>} ->
         mark(@send_ok)
         :ok
 
@@ -264,7 +304,7 @@ defmodule MicroPhoenix do
   defp mark_client_done(:unexpected), do: mark(@client_done_send_unexpected)
 
   defp close_socket(socket, mark_success) do
-    case :gen_tcp.close(socket) do
+    case :socket.close(socket) do
       :ok ->
         if mark_success do
           mark(@close_ok)
@@ -272,6 +312,15 @@ defmodule MicroPhoenix do
 
       {:error, _reason} ->
         mark(@close_error)
+    end
+  end
+
+  defp listen_socket() do
+    with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
+         :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
+         :ok <- :socket.bind(socket, %{family: :inet, port: @port, addr: :any}),
+         :ok <- :socket.listen(socket) do
+      {:ok, socket}
     end
   end
 
@@ -285,12 +334,5 @@ defmodule MicroPhoenix do
     end
 
     :ok
-  end
-
-  defp wait_forever do
-    receive do
-    after
-      1000 -> wait_forever()
-    end
   end
 end

@@ -1,17 +1,52 @@
 defmodule MicroPhoenix.Static do
-  # 404エラーページ
-  def get_error_page(404) do
-    {:error, 404}
+  @mimes %{
+    ".css" => "text/css",
+    ".gif" => "image/gif",
+    ".html" => "text/html",
+    ".ico" => "image/x-icon",
+    ".jpeg" => "image/jpeg",
+    ".jpg" => "image/jpeg",
+    ".js" => "application/javascript",
+    ".json" => "application/json",
+    ".png" => "image/png",
+    ".svg" => "image/svg+xml",
+    ".txt" => "text/plain",
+    ".xml" => "application/xml"
+  }
+
+  def serve(path) when is_binary(path) do
+    relative = normalize_path(path)
+
+    case read_file(relative) do
+      {:ok, body} -> {:ok, content_type(relative), body}
+      :error -> :not_found
+    end
   end
 
-  # 405エラーページ
-  def get_error_page(405) do
-    {:error, 405}
+  def get_error_page(404), do: {:error, 404}
+  def get_error_page(405), do: {:error, 405}
+  def get_error_page(status), do: {:error, status}
+
+  defp normalize_path("/"), do: "index.html"
+  defp normalize_path(path), do: trim_leading_slash(path)
+
+  defp trim_leading_slash(<<"/", rest::binary>>), do: trim_leading_slash(rest)
+  defp trim_leading_slash(path), do: path
+
+  defp read_file(relative) do
+    root = Application.get_env(:micro_phoenix, :static_root, "priv/static")
+    full = Path.join(root, relative)
+
+    case File.read(full) do
+      {:ok, body} -> {:ok, body}
+      {:error, _} -> :error
+    end
   end
 
-  # その他のエラー
-  def get_error_page(status) do
-    {:error, status}
+  defp content_type(path) do
+    path
+    |> Path.extname()
+    |> Phoenix.Binary.downcase_ascii()
+    |> then(&Map.get(@mimes, &1, "application/octet-stream"))
   end
-
 end
