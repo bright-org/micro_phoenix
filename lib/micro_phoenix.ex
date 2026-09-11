@@ -1,5 +1,12 @@
 defmodule MicroPhoenix do
   @port Application.compile_env(:micro_phoenix, :port, 8080)
+  @http_transport Application.compile_env(:micro_phoenix, :http_transport, :socket)
+
+  unless @http_transport in [:socket, :gen_tcp] do
+    raise ArgumentError,
+          "invalid :micro_phoenix, :http_transport value: #{inspect(@http_transport)}"
+  end
+
   @server_name MicroPhoenix.Server
   @listen_start 0xE7101101
   @listen_ok 0xE7101102
@@ -114,10 +121,10 @@ defmodule MicroPhoenix do
   end
 
   defp accept_loop(listen_sock) do
-    case :socket.accept(listen_sock) do
+    case accept_socket(listen_sock) do
       {:ok, client} ->
         mark(@accept_ok)
-        spawn(fn -> handle_client(client) end)
+        handle_accepted_client(client)
         accept_loop(listen_sock)
 
       {:error, _reason} ->
@@ -130,10 +137,10 @@ defmodule MicroPhoenix do
     try do
       mark(@recv_wait)
 
-      case :socket.recv(socket, 0) do
+      case recv_socket(socket) do
         {:ok, data} ->
-          # Keep the established app-side receive boundary marker while the
-          # transport moves from :gen_tcp to direct :socket calls.
+          # Keep the established app-side receive boundary marker for both
+          # transport implementations.
           mark(@gen_tcp_socket_recv_return)
           mark(@recv_ok)
 
@@ -271,7 +278,7 @@ defmodule MicroPhoenix do
   end
 
   defp send_response(socket, response) do
-    case :socket.send(socket, response) do
+    case send_socket(socket, response) do
       :ok ->
         mark(@send_ok)
         :ok
@@ -304,7 +311,7 @@ defmodule MicroPhoenix do
   defp mark_client_done(:unexpected), do: mark(@client_done_send_unexpected)
 
   defp close_socket(socket, mark_success) do
-    case :socket.close(socket) do
+    case transport_close(socket) do
       :ok ->
         if mark_success do
           mark(@close_ok)
@@ -316,11 +323,61 @@ defmodule MicroPhoenix do
   end
 
   defp listen_socket() do
-    with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
-         :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
-         :ok <- :socket.bind(socket, %{family: :inet, port: @port, addr: :any}),
-         :ok <- :socket.listen(socket) do
-      {:ok, socket}
+    case @http_transport do
+      :socket ->
+        with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
+             :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
+             :ok <- :socket.bind(socket, %{family: :inet, port: @port, addr: :any}),
+             :ok <- :socket.listen(socket) do
+          {:ok, socket}
+        end
+
+      :gen_tcp ->
+        :gen_tcp.listen(@port, [
+          :binary,
+          {:active, false},
+          {:reuseaddr, true},
+          {:packet, :raw},
+          {:inet_backend, :socket}
+        ])
+    end
+  end
+
+  defp accept_socket(listen_sock) do
+    case @http_transport do
+      :socket -> :socket.accept(listen_sock)
+      :gen_tcp -> :gen_tcp.accept(listen_sock)
+    end
+  end
+
+  defp handle_accepted_client(client) do
+    case @http_transport do
+      :socket ->
+        spawn(fn -> handle_client(client) end)
+
+      :gen_tcp ->
+        handle_client(client)
+    end
+  end
+
+  defp recv_socket(socket) do
+    case @http_transport do
+      :socket -> :socket.recv(socket, 0)
+      :gen_tcp -> :gen_tcp.recv(socket, 0)
+    end
+  end
+
+  defp send_socket(socket, response) do
+    case @http_transport do
+      :socket -> :socket.send(socket, response)
+      :gen_tcp -> :gen_tcp.send(socket, response)
+    end
+  end
+
+  defp transport_close(socket) do
+    case @http_transport do
+      :socket -> :socket.close(socket)
+      :gen_tcp -> :gen_tcp.close(socket)
     end
   end
 
