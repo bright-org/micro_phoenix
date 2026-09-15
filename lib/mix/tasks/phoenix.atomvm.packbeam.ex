@@ -104,13 +104,13 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
 
   # Bake host Application env into Boot. AtomVM's Application stub has no get_env.
   # Force TCP + single-connection options suitable for AtomVM Postgres.
+  # :ssl follows Application env / postgrex defaults (false unless configured).
   defp atomvm_repo_config(otp_app, repo) do
     Application.get_env(otp_app, repo, [])
     |> Keyword.merge(
       hostname: "127.0.0.1",
       pool_size: 1,
-      ssl: false,
-      pool: DBConnection.SingleConnection,
+      pool: DBConnection.ConnectionPool,
       migration_lock: false,
       # Computed on the host Mix node — AtomVM lacks Module.split/Macro.underscore.
       telemetry_prefix: telemetry_prefix(repo)
