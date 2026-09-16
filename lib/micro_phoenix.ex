@@ -20,6 +20,8 @@ defmodule MicroPhoenix do
   @response_built 0xE7101109
   @send_rest 0xE710110A
   @send_unexpected 0xE710110B
+  @send_retry_delay_ms 10
+  @send_retry_limit 1_000
   @client_done_send_ok 0xE7101110
   @client_done_send_partial_ok 0xE7101111
   @client_done_send_error 0xE7101112
@@ -278,6 +280,10 @@ defmodule MicroPhoenix do
   end
 
   defp send_response(socket, response) do
+    send_response(socket, response, @send_retry_limit)
+  end
+
+  defp send_response(socket, response, retries_left) do
     case send_socket(socket, response) do
       :ok ->
         mark(@send_ok)
@@ -293,6 +299,13 @@ defmodule MicroPhoenix do
         case send_response(socket, rest) do
           :ok -> :partial_ok
           other -> other
+        end
+
+      {:error, reason}
+      when reason in [:eagain, :ewouldblock] and retries_left > 0 ->
+        receive do
+        after
+          @send_retry_delay_ms -> send_response(socket, response, retries_left - 1)
         end
 
       {:error, _reason} ->
