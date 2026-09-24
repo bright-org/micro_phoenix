@@ -94,6 +94,42 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
     end
     """
 
+    compile_boot!(source)
+  end
+
+  @doc false
+  def write_migrate_boot_beam!(repo, migrations, otp_app)
+      when is_atom(repo) and is_list(migrations) and is_atom(otp_app) do
+    opts = [
+      repo_config: atomvm_repo_config(otp_app, repo),
+      all: true,
+      migration_lock: false,
+      log: false
+    ]
+
+    source = """
+    defmodule #{inspect(@boot_module)} do
+      @moduledoc false
+
+      def start do
+        result =
+          Phoenix.AtomVM.migrate(
+            #{inspect(repo)},
+            #{inspect(migrations)},
+            #{inspect(opts)}
+          )
+
+        IO.puts("atomvm_migrate:" <> inspect(result))
+        # AtomVM has no erlang:halt/1. Mix.Tasks.Phoenix.Atomvm.Migrate stops the VM.
+        :ok
+      end
+    end
+    """
+
+    compile_boot!(source)
+  end
+
+  defp compile_boot!(source) do
     File.mkdir_p!(Project.compile_path())
 
     boot_module = @boot_module
@@ -104,13 +140,13 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
 
   # Bake host Application env into Boot. AtomVM's Application stub has no get_env.
   # Force TCP + single-connection options suitable for AtomVM Postgres.
-  defp atomvm_repo_config(otp_app, repo) do
+  def atomvm_repo_config(otp_app, repo) do
     Application.get_env(otp_app, repo, [])
     |> Keyword.merge(
       hostname: "127.0.0.1",
       pool_size: 1,
       ssl: false,
-      pool: DBConnection.SingleConnection,
+      pool: DBConnection.ConnectionPool,
       migration_lock: false,
       # Computed on the host Mix node — AtomVM lacks Module.split/Macro.underscore.
       telemetry_prefix: telemetry_prefix(repo)
@@ -123,7 +159,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
     |> Enum.map(&(&1 |> Macro.underscore() |> String.to_atom()))
   end
 
-  defp boot_beam_path do
+  def boot_beam_path do
     Path.join(Project.compile_path(), "#{Atom.to_string(@boot_module)}.beam")
   end
 
