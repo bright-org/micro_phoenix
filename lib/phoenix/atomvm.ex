@@ -16,9 +16,9 @@ defmodule Phoenix.AtomVM do
       mix phoenix.atomvm.packbeam
       mix phoenix.atomvm.run
 
-  For explicit migrations (host `mix ecto.migrate` timing):
+  For explicit migrations (host timing equivalent of pending migrate):
 
-      mix phoenix.atomvm.migrate
+      mix ecto.migrate
 
   `mix phoenix.atomvm.packbeam` generates `Phoenix.AtomVM.Boot` into the app ebin
   (ExAtomVM requires the start beam there) and packs the AVM. You can also call
@@ -91,10 +91,27 @@ defmodule Phoenix.AtomVM do
 
     migrator_opts =
       opts
-      |> Keyword.take([:all, :step, :to, :to_exclusive, :log, :log_migrations_sql, :log_migrator_sql, :prefix])
-      |> Keyword.put_new(:all, true)
+      |> Keyword.take([
+        :all,
+        :step,
+        :to,
+        :to_exclusive,
+        :log,
+        :log_migrations_sql,
+        :log_migrator_sql,
+        :prefix,
+        :strict_version_order
+      ])
+      |> then(fn taken ->
+        if taken[:to] || taken[:to_exclusive] || taken[:step] || taken[:all] do
+          taken
+        else
+          Keyword.put(taken, :all, true)
+        end
+      end)
+      # AtomVM: advisory migration lock path is not reliable; keep unlocked.
       |> Keyword.put_new(:migration_lock, false)
-      |> Keyword.put_new(:log, false)
+      |> Keyword.put_new(:log, :info)
 
     try do
       Ecto.Migrator.run(repo, migrations, :up, migrator_opts)
