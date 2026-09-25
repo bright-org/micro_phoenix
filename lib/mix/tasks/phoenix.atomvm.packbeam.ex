@@ -98,29 +98,26 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
   end
 
   @doc false
-  def write_migrate_boot_beam!(repo, migrations, otp_app)
-      when is_atom(repo) and is_list(migrations) and is_atom(otp_app) do
-    opts = [
-      repo_config: atomvm_repo_config(otp_app, repo),
-      all: true,
-      migration_lock: false,
-      log: false
-    ]
+  def write_migrate_boot_beam!(repo, migrations, otp_app, migrator_opts \\ [])
+      when is_atom(repo) and is_list(migrations) and is_atom(otp_app) and is_list(migrator_opts) do
+    opts =
+      migrator_opts
+      |> Keyword.put(:repo_config, atomvm_repo_config(otp_app, repo, migrator_opts))
+      |> Keyword.put_new(:migration_lock, false)
 
     source = """
     defmodule #{inspect(@boot_module)} do
       @moduledoc false
 
       def start do
-        result =
-          Phoenix.AtomVM.migrate(
-            #{inspect(repo)},
-            #{inspect(migrations)},
-            #{inspect(opts)}
-          )
+        Phoenix.AtomVM.migrate(
+          #{inspect(repo)},
+          #{inspect(migrations)},
+          #{inspect(opts)}
+        )
 
-        IO.puts("atomvm_migrate:" <> inspect(result))
-        # AtomVM has no erlang:halt/1. Mix.Tasks.Phoenix.Atomvm.Migrate stops the VM.
+        # AtomVM has no erlang:halt/1. Mix.Tasks.Ecto.Migrate stops the VM
+        # after upstream migrate logs (e.g. "== Migrated" / "Migrations already up").
         :ok
       end
     end
@@ -140,13 +137,16 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
 
   # Bake host Application env into Boot. AtomVM's Application stub has no get_env.
   # Force TCP + single-connection options suitable for AtomVM Postgres.
-  def atomvm_repo_config(otp_app, repo) do
+  def atomvm_repo_config(otp_app, repo, migrator_opts \\ []) do
+    pool_size = Keyword.get(migrator_opts, :pool_size, 2)
+
     Application.get_env(otp_app, repo, [])
     |> Keyword.merge(
       hostname: "127.0.0.1",
-      pool_size: 1,
+      pool_size: pool_size,
       ssl: false,
       pool: DBConnection.ConnectionPool,
+      # AtomVM: advisory migration lock path is not reliable; keep unlocked.
       migration_lock: false,
       # Computed on the host Mix node — AtomVM lacks Module.split/Macro.underscore.
       telemetry_prefix: telemetry_prefix(repo)
