@@ -16,9 +16,13 @@ defmodule Phoenix.AtomVM do
       mix phoenix.atomvm.packbeam
       mix phoenix.atomvm.run
 
+  For explicit migrations (host `mix ecto.migrate` timing):
+
+      mix phoenix.atomvm.migrate
+
   `mix phoenix.atomvm.packbeam` generates `Phoenix.AtomVM.Boot` into the app ebin
   (ExAtomVM requires the start beam there) and packs the AVM. You can also call
-  `run/2` directly from tests.
+  `run/2` / `migrate/3` directly from tests.
   """
 
   @header_limit 65_536
@@ -73,6 +77,38 @@ defmodule Phoenix.AtomVM do
     end
   end
 
+  @doc """
+  Runs migrations on AtomVM via `Ecto.Migrator` (tuple source, no Mix / no `.exs` load).
+
+  `migrations` is a list of `{version, module}` as accepted by `Ecto.Migrator.run/4`.
+  """
+  def migrate(repo, migrations, opts \\ [])
+      when is_atom(repo) and is_list(migrations) and is_list(opts) do
+    repo_config = Keyword.get(opts, :repo_config, [])
+
+    ensure_ecto_stack_started()
+    ensure_repo_started(repo, repo_config)
+
+    migrator_opts =
+      opts
+      |> Keyword.take([:all, :step, :to, :to_exclusive, :log, :log_migrations_sql, :log_migrator_sql, :prefix])
+      |> Keyword.put_new(:all, true)
+      |> Keyword.put_new(:migration_lock, false)
+      |> Keyword.put_new(:log, false)
+
+    try do
+      Ecto.Migrator.run(repo, migrations, :up, migrator_opts)
+    rescue
+      e ->
+        :erlang.display({:migrate_error, Exception.message(e)})
+        {:error, e}
+    catch
+      kind, reason ->
+        :erlang.display({:migrate_catch, kind, reason})
+        {:error, {kind, reason}}
+    end
+  end
+
   defp listen_socket(port) do
     with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
          :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
@@ -104,12 +140,10 @@ defmodule Phoenix.AtomVM do
     case repo.start_link(repo_config) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _}} -> :ok
-      other -> :erlang.display({:repo_start_failed, other})
+      other ->
+        :erlang.display({:repo_start_failed, other})
+        raise "repo start_link failed: #{inspect(other)}"
     end
-  rescue
-    e -> :erlang.display({:repo_start_error, Exception.message(e)})
-  catch
-    kind, reason -> :erlang.display({:repo_start_catch, kind, reason})
   end
 
   defp accept_loop(listen_sock, router, static) do
