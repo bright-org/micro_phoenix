@@ -31,6 +31,9 @@ defmodule Phoenix.Component do
     end
   end
 
+  # Non-LiveView forms consider every input used (upstream Phoenix.Component docs).
+  # Always-false hid changeset errors in core_components `.input`.
+  def used_input?(%Phoenix.HTML.FormField{}), do: true
   def used_input?(_field), do: false
 
   def assign(assigns, key, value) when is_atom(key) do
