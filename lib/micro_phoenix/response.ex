@@ -24,7 +24,7 @@ defmodule MicroPhoenix.Response do
   defp flash_headers(%Conn{flash: flash} = conn) do
     cookie =
       flash
-      |> Enum.map(fn {k, v} -> "#{k}=#{URI.encode_www_form(v)}" end)
+      |> Enum.map(fn {k, v} -> "#{k}=#{AtomVM.URI.encode_www_form(v)}" end)
       |> Enum.join("&")
 
     headers = [{"set-cookie", "_micro_flash=#{cookie}; Path=/"} | conn.resp_headers]
