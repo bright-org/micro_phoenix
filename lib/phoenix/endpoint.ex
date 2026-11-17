@@ -5,8 +5,6 @@ defmodule Phoenix.Endpoint do
     otp_app = Keyword.fetch!(opts, :otp_app)
 
     quote bind_quoted: [otp_app: otp_app] do
-      @behaviour Plug
-
       use Plug.Builder, otp_app: otp_app
 
       import Phoenix.Endpoint
@@ -15,7 +13,9 @@ defmodule Phoenix.Endpoint do
 
       @otp_app otp_app
 
-      var!(code_reloading?) = Application.compile_env(@otp_app, [__MODULE__, :code_reloader], false)
+      var!(code_reloading?) =
+        Application.compile_env(@otp_app, [__MODULE__, :code_reloader], false)
+
       _ = var!(code_reloading?)
 
       def child_spec(opts) do
@@ -35,6 +35,19 @@ defmodule Phoenix.Endpoint do
       end
 
       def config_change(_changed, _removed), do: :ok
+
+      @before_compile Phoenix.Endpoint
+    end
+  end
+
+  defmacro __before_compile__(env) do
+    sockets =
+      env.module
+      |> Module.get_attribute(:phoenix_sockets)
+      |> Enum.reverse()
+
+    quote do
+      def __phoenix_sockets__, do: unquote(Macro.escape(sockets))
     end
   end
 
@@ -155,7 +168,7 @@ defmodule Phoenix.Endpoint.Server do
 
   @doc false
   def dispatch(data, endpoint, endpoint_opts \\ []) when is_binary(data) do
-    with {:ok, conn} <- build_conn(data),
+    with {:ok, conn} <- build_conn(data, false),
          conn when is_map(conn) <- endpoint.call(conn, endpoint_opts) do
       {:ok, encode_response(conn)}
     else
@@ -165,7 +178,7 @@ defmodule Phoenix.Endpoint.Server do
 
   @doc false
   def dispatch_router(data, router, router_opts \\ []) when is_binary(data) do
-    with {:ok, conn} <- build_conn(data) do
+    with {:ok, conn} <- build_conn(data, true) do
       static_opts = Keyword.get(router_opts, :static, [])
 
       case Phoenix.Static.try_serve(conn, static_opts) do
@@ -194,7 +207,7 @@ defmodule Phoenix.Endpoint.Server do
     |> Enum.join("\r\n")
   end
 
-  defp build_conn(data) do
+  defp build_conn(data, preparse_body?) do
     case Phoenix.Binary.split2(data, "\r\n\r\n") do
       [header_part, body] ->
         [request_line | headers] = Phoenix.Binary.split(header_part, "\r\n")
@@ -206,15 +219,28 @@ defmodule Phoenix.Endpoint.Server do
             req_headers = parse_headers(headers)
             body_params = parse_body_params(req_headers, body)
 
+            parsed_body_params = Map.delete(body_params, "_method")
+
+            body_params =
+              if preparse_body? or method not in ["POST", "PUT", "PATCH", "DELETE"] do
+                parsed_body_params
+              else
+                %Plug.Conn.Unfetched{aspect: :body_params}
+              end
+
+            params = if preparse_body?, do: parsed_body_params, else: %{}
+
             conn = %Plug.Conn{
-              adapter: {Phoenix.Endpoint.GenTCPAdapter, %Phoenix.Endpoint.GenTCPAdapter{}},
-              method: override_method(method, body_params),
+              adapter:
+                {Phoenix.Endpoint.GenTCPAdapter,
+                 %Phoenix.Endpoint.GenTCPAdapter{request_body: body}},
+              method: override_method(method, parsed_body_params),
               request_path: path,
               path_info: Phoenix.Binary.split_trim(path, "/"),
               query_string: query,
               req_headers: req_headers,
-              body_params: Map.delete(body_params, "_method"),
-              params: Map.delete(body_params, "_method"),
+              body_params: body_params,
+              params: params,
               scheme: :http,
               host: "localhost",
               port: 4000,
@@ -304,7 +330,7 @@ defmodule Phoenix.Endpoint.Server do
   defp url_decode(<<"%", h1, h2, rest::binary>>, acc) do
     case {hex_val(h1), hex_val(h2)} do
       {v1, v2} when is_integer(v1) and is_integer(v2) ->
-        url_decode(rest, <<acc::binary, (v1 * 16 + v2)>>)
+        url_decode(rest, <<acc::binary, v1 * 16 + v2>>)
 
       _ ->
         url_decode(<<h1, h2, rest::binary>>, <<acc::binary, ?%>>)
@@ -365,7 +391,9 @@ defmodule Phoenix.Endpoint.Server do
     |> Enum.join("\r\n")
   end
 
-  defp response_parts(%Plug.Conn{adapter: {_mod, %{status: status, headers: headers, body: body}}})
+  defp response_parts(%Plug.Conn{
+         adapter: {_mod, %{status: status, headers: headers, body: body}}
+       })
        when not is_nil(status) do
     {status, headers, body}
   end
@@ -383,8 +411,5 @@ defmodule Phoenix.Endpoint.Server do
     [{"content-length", :erlang.integer_to_binary(byte_size(body))} | headers]
   end
 
-  defp status_message(200), do: "OK"
-  defp status_message(302), do: "Found"
-  defp status_message(404), do: "Not Found"
-  defp status_message(_code), do: "OK"
+  defp status_message(code), do: Plug.Conn.Status.reason_phrase(code)
 end

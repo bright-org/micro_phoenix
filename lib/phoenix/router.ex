@@ -153,22 +153,30 @@ defmodule Phoenix.Router do
       {:ok, controller, action, path_params, pipeline_name} ->
         conn =
           conn
-          |> run_pipeline(pipelines, pipeline_name, router)
           |> Map.put(:path_params, path_params)
           |> Map.put(:params, Map.merge(conn.params, path_params))
+          |> run_pipeline(pipelines, pipeline_name, router)
           |> Plug.Conn.put_private(:phoenix_controller, controller)
           |> Plug.Conn.put_private(:phoenix_action, action)
 
-        controller |> resolve_controller(conn) |> apply(action, [conn, conn.params])
+        if conn.halted do
+          conn
+        else
+          controller |> resolve_controller(conn) |> apply(action, [conn, conn.params])
+        end
 
       {:forward, plug, path_params, pipeline_name} ->
         conn =
           conn
-          |> run_pipeline(pipelines, pipeline_name, router)
           |> Map.put(:path_params, path_params)
           |> Map.put(:params, Map.merge(conn.params, path_params))
+          |> run_pipeline(pipelines, pipeline_name, router)
 
-        plug.call(conn, plug.init([]))
+        if conn.halted do
+          conn
+        else
+          plug.call(conn, plug.init([]))
+        end
 
       :error ->
         conn
@@ -180,22 +188,32 @@ defmodule Phoenix.Router do
   defp run_pipeline(conn, _pipelines, nil, _router), do: conn
 
   defp run_pipeline(conn, pipelines, pipeline_name, router) do
-    Enum.reduce(pipelines[pipeline_name] || [], conn, fn {plug, opts}, acc ->
+    run_plugs(pipelines[pipeline_name] || [], conn, router)
+  end
+
+  defp run_plugs([], conn, _router), do: conn
+  defp run_plugs(_plugs, %Plug.Conn{halted: true} = conn, _router), do: conn
+
+  defp run_plugs([{plug, opts} | rest], conn, router) do
+    conn =
       case plug do
         plug when is_atom(plug) and plug in [:accepts, :fetch_session, :fetch_live_flash, :put_root_layout, :put_layout, :protect_from_forgery, :put_secure_browser_headers] ->
-          apply(Phoenix.Controller, plug, [acc, opts])
+          apply(Phoenix.Controller, plug, [conn, opts])
 
         plug when is_atom(plug) ->
-          if function_exported?(router, plug, 2) do
-            apply(router, plug, [acc, opts])
-          else
-            acc
-          end
+          cond do
+            function_exported?(plug, :call, 2) ->
+              plug.call(conn, plug.init(opts))
 
-        module when is_atom(module) ->
-          module.call(acc, opts)
+            function_exported?(router, plug, 2) ->
+              apply(router, plug, [conn, opts])
+
+            true ->
+              raise ArgumentError, "router plug not found: #{plug}"
+          end
       end
-    end)
+
+    run_plugs(rest, conn, router)
   end
 
   defp match_route(method, path, routes) do
