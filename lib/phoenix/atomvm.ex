@@ -143,22 +143,32 @@ defmodule Phoenix.AtomVM do
     end
   end
 
-  defp ensure_ecto_stack_started do
-    Enum.each(
-      [
-        Ecto.Application,
-        DBConnection.App,
-        Postgrex.App,
-        Ecto.Adapters.SQL.Application
-      ],
-      fn mod ->
-        case mod.start(:normal, []) do
-          {:ok, _} -> :ok
-          {:error, {:already_started, _}} -> :ok
-          other -> :erlang.display({:ecto_stack_start_failed, mod, other})
-        end
+  @doc false
+  def ensure_ecto_stack_started(apps \\ default_ecto_stack()) do
+    Enum.each(apps, fn mod ->
+      case :code.ensure_loaded(mod) do
+        {:module, ^mod} ->
+          case mod.start(:normal, []) do
+            {:ok, _} -> :ok
+            {:error, {:already_started, _}} -> :ok
+            other -> :erlang.display({:ecto_stack_start_failed, mod, other})
+          end
+
+        _ ->
+          :ok
       end
-    )
+    end)
+
+    :ok
+  end
+
+  defp default_ecto_stack do
+    [
+      Ecto.Application,
+      DBConnection.App,
+      Postgrex.App,
+      Ecto.Adapters.SQL.Application
+    ]
   end
 
   defp ensure_repo_started(repo, repo_config) do
