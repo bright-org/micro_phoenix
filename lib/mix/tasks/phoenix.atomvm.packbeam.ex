@@ -11,6 +11,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
       atomvm: [
         start: Phoenix.AtomVM.Boot,
         router: MyAppWeb.Router,
+        endpoint: MyAppWeb.Endpoint,
         repo: MyApp.Repo,
         port: 8080
       ]
@@ -45,6 +46,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
         """)
 
     repo = Keyword.get(avm_config, :repo)
+    endpoint = Keyword.get(avm_config, :endpoint)
     port = Keyword.get(avm_config, :port, 8080)
     otp_app = Keyword.get(avm_config, :otp_app, Project.config()[:app])
 
@@ -54,7 +56,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
       Mix.raise("atomvm: [start: ...] must be #{inspect(@boot_module)}, got #{inspect(start)}")
     end
 
-    write_boot_beam!(router, repo, port, otp_app)
+    write_boot_beam!(router, repo, port, otp_app, endpoint)
     Mix.shell().info("Generated #{inspect(@boot_module)} -> #{boot_beam_path()}")
 
     Mix.Tasks.Phoenix.Atomvm.CompatBeams.ensure_avm_deps!()
@@ -63,19 +65,85 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
     _ = Mix.Task.rerun("assets.build")
 
     case Mix.Task.run("atomvm.packbeam", args) do
-      :ok -> :ok
-      {:ok, _} -> :ok
+      :ok -> repack_request_id!(start)
+      {:ok, _} -> repack_request_id!(start)
       other -> other
     end
   end
 
   @doc false
-  def write_boot_beam!(router, repo, port, otp_app)
+  def target_dependency_beams(beams) do
+    Enum.reject(beams, fn path ->
+      Path.basename(path) in [
+        "Elixir.Plug.RequestId.beam",
+        "Elixir.Plug.Conn.beam",
+        "Elixir.Plug.Conn.Query.beam",
+        "Elixir.Plug.Static.beam",
+        "Elixir.Plug.Static.InvalidPathError.beam",
+        "telemetry.beam"
+      ]
+    end)
+  end
+
+  @doc false
+  def repack_request_id!(start) do
+    alias ExAtomVM.PackBEAM
+
+    dep_beams =
+      Mix.Tasks.Atomvm.Packbeam.runtime_deps_beams()
+      |> target_dependency_beams()
+      |> Enum.map(&{&1, :beam})
+
+    dep_avms =
+      Path.wildcard("avm_deps/*.avm")
+      |> Enum.map(&{&1, :avm})
+
+    if not Enum.any?(dep_avms, fn {path, _} -> Path.basename(path) == "plug_request_id.avm" end) do
+      Mix.raise("missing AtomVM Plug.RequestId replacement")
+    end
+
+    unless Enum.any?(dep_avms, fn {path, _} -> Path.basename(path) == "plug_conn_query.avm" end) do
+      Mix.raise("missing AtomVM Plug.Conn.Query replacement")
+    end
+
+    unless Enum.any?(dep_avms, fn {path, _} -> Path.basename(path) == "plug_conn.avm" end) do
+      Mix.raise("missing AtomVM Plug.Conn replacement")
+    end
+
+    unless Enum.any?(dep_avms, fn {path, _} -> Path.basename(path) == "plug_static.avm" end) do
+      Mix.raise("missing AtomVM Plug.Static replacement")
+    end
+
+    :ok = PackBEAM.make_avm(dep_beams ++ dep_avms, "deps.avm")
+
+    start_beam = "#{start}.beam"
+
+    app_beams =
+      Project.compile_path()
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".beam"))
+      |> List.delete(start_beam)
+      |> Enum.map(&{Path.join(Project.compile_path(), &1), :beam})
+
+    inputs =
+      [{Path.join(Project.compile_path(), start_beam), :beam_start}] ++
+        app_beams ++ [{"deps.avm", :avm}, {"priv.avm", :avm}]
+
+    :ok = PackBEAM.make_avm(inputs, "#{Project.config()[:app]}.avm")
+  end
+
+  @doc false
+  def write_boot_beam!(router, repo, port, otp_app),
+    do: write_boot_beam!(router, repo, port, otp_app, nil)
+
+  @doc false
+  def write_boot_beam!(router, repo, port, otp_app, endpoint)
       when is_atom(router) and (is_atom(repo) or is_nil(repo)) and is_integer(port) and
-             is_atom(otp_app) do
+             is_atom(otp_app) and (is_atom(endpoint) or is_nil(endpoint)) do
     opts =
       [port: port, otp_app: otp_app]
       |> then(fn opts -> if repo, do: Keyword.put(opts, :repo, repo), else: opts end)
+      |> then(fn opts -> if endpoint, do: Keyword.put(opts, :endpoint, endpoint), else: opts end)
       |> then(fn opts ->
         if repo do
           Keyword.put(opts, :repo_config, atomvm_repo_config(otp_app, repo))
@@ -83,6 +151,9 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
           opts
         end
       end)
+
+    socket_opts = socket_run_opts(endpoint)
+    opts = if socket_opts == [], do: opts, else: Keyword.put(opts, :socket, socket_opts)
 
     source = """
     defmodule #{inspect(@boot_module)} do
@@ -95,6 +166,37 @@ defmodule Mix.Tasks.Phoenix.Atomvm.Packbeam do
     """
 
     compile_boot!(source)
+  end
+
+  @doc false
+  def socket_run_opts(nil), do: []
+
+  def socket_run_opts(endpoint) do
+    Code.ensure_loaded(endpoint)
+
+    unless function_exported?(endpoint, :__phoenix_sockets__, 0) do
+      Mix.raise(
+        "expected #{inspect(endpoint)}.__phoenix_sockets__/0 — run `mix compile` so the " <>
+          "endpoint picks up the Phoenix.Endpoint socket definitions"
+      )
+    end
+
+    endpoint.__phoenix_sockets__()
+    |> Enum.flat_map(fn
+      {path, module, opts} when is_binary(path) and is_atom(module) and is_list(opts) ->
+        if Code.ensure_loaded?(module) do
+          [{path, module, opts}]
+        else
+          Mix.shell().info(
+            "Skipping socket #{inspect(path)}: #{inspect(module)} is not compiled into the project"
+          )
+
+          []
+        end
+
+      other ->
+        Mix.raise("unexpected socket declaration in #{inspect(endpoint)}: #{inspect(other)}")
+    end)
   end
 
   @doc false

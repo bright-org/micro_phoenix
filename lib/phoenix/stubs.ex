@@ -6,22 +6,140 @@ end
 defmodule Phoenix.Channel do
   @moduledoc false
   defmacro __using__(_opts), do: :ok
+
+  def push(%{transport_pid: transport_pid, join_ref: join_ref, topic: topic}, event, payload)
+      when is_binary(event) and is_map(payload) do
+    send(transport_pid, {:channel_push, join_ref, topic, event, payload})
+    :ok
+  end
+
+  def broadcast_from(%{pubsub_server: server, topic: topic}, event, payload)
+      when not is_nil(server) and is_binary(event) and is_map(payload) do
+    Phoenix.PubSub.broadcast_from(
+      server,
+      self(),
+      topic,
+      %Phoenix.Socket.Broadcast{topic: topic, event: event, payload: payload}
+    )
+  end
+
+  def broadcast(%{pubsub_server: server, topic: topic}, event, payload)
+      when not is_nil(server) and is_binary(event) and is_map(payload) do
+    Phoenix.PubSub.broadcast(
+      server,
+      topic,
+      %Phoenix.Socket.Broadcast{topic: topic, event: event, payload: payload}
+    )
+  end
 end
 
 defmodule Phoenix.PubSub do
   @moduledoc false
-  use GenServer
 
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    GenServer.start_link(__MODULE__, opts, name: name)
+
+    case :erlang.whereis(name) do
+      :undefined ->
+        pid = spawn_link(fn -> loop(%{}, %{}) end)
+        true = :erlang.register(name, pid)
+        {:ok, pid}
+
+      pid ->
+        {:error, {:already_started, pid}}
+    end
   end
 
-  @impl GenServer
-  def init(_opts), do: {:ok, %{}}
+  def subscribe(server, topic), do: call(server, {:subscribe, topic})
+  def unsubscribe(server, topic), do: call(server, {:unsubscribe, topic})
 
-  def broadcast(_server, _topic, _message), do: :ok
-  def subscribe(_server, _topic), do: :ok
+  def broadcast(server, topic, message), do: broadcast_from(server, nil, topic, message)
+
+  def broadcast_from(server, sender, topic, message) do
+    send(server_pid(server), {:broadcast, sender, topic, message})
+    :ok
+  end
+
+  defp call(server, request) do
+    ref = make_ref()
+    send(server_pid(server), {request, self(), ref})
+
+    receive do
+      {^ref, response} -> response
+    after
+      5_000 -> {:error, :timeout}
+    end
+  end
+
+  defp server_pid(pid) when is_pid(pid), do: pid
+  defp server_pid(name), do: :erlang.whereis(name)
+
+  defp loop(topics, monitors) do
+    receive do
+      {{:subscribe, topic}, pid, ref} ->
+        subscribers = Map.get(topics, topic, [])
+
+        {topics, monitors} =
+          if :lists.member(pid, subscribers) do
+            {topics, monitors}
+          else
+            monitors =
+              if Map.has_key?(monitors, pid) do
+                monitors
+              else
+                Map.put(monitors, pid, :erlang.monitor(:process, pid))
+              end
+
+            {Map.put(topics, topic, [pid | subscribers]), monitors}
+          end
+
+        send(pid, {ref, :ok})
+        loop(topics, monitors)
+
+      {{:unsubscribe, topic}, pid, ref} ->
+        topics = Map.put(topics, topic, :lists.delete(pid, Map.get(topics, topic, [])))
+
+        monitors =
+          if Enum.any?(topics, fn {_topic, subscribers} -> :lists.member(pid, subscribers) end) do
+            monitors
+          else
+            case Map.get(monitors, pid) do
+              nil ->
+                monitors
+
+              monitor_ref ->
+                :erlang.demonitor(monitor_ref)
+                Map.delete(monitors, pid)
+            end
+          end
+
+        send(pid, {ref, :ok})
+        loop(topics, monitors)
+
+      {:broadcast, sender, topic, message} ->
+        deliver(Map.get(topics, topic, []), sender, message)
+        loop(topics, monitors)
+
+      {:DOWN, ref, :process, pid, _reason} ->
+        if Map.get(monitors, pid) == ref do
+          topics = remove_pid(topics, pid)
+          loop(topics, Map.delete(monitors, pid))
+        else
+          loop(topics, monitors)
+        end
+    end
+  end
+
+  defp deliver([], _sender, _message), do: :ok
+
+  defp deliver([pid | rest], sender, message) do
+    if pid != sender, do: send(pid, message)
+    deliver(rest, sender, message)
+  end
+
+  defp remove_pid(topics, pid) do
+    :maps.map(fn _topic, subscribers -> :lists.delete(pid, subscribers) end, topics)
+  end
 end
 
 defmodule Phoenix.LiveView do
@@ -109,8 +227,6 @@ defmodule Phoenix.LiveView.JS do
   def patch(%__MODULE__{} = js, href, opts) when is_binary(href) and is_list(opts),
     do: %{js | ops: js.ops ++ [{:patch, href, opts}]}
 
-  # Supports both JS.remove_attribute("hidden", to: "...") and
-  # hide(...) |> JS.remove_attribute("hidden", to: "...").
   def remove_attribute(js_or_attr, attr_or_opts \\ [])
 
   def remove_attribute(%__MODULE__{} = js, attr) when not is_list(attr),
@@ -136,7 +252,6 @@ end
 
 defimpl Phoenix.HTML.Safe, for: Phoenix.LiveView.JS do
   def to_iodata(%Phoenix.LiveView.JS{ops: ops}) do
-    # Do not emit raw `"` — attribute values are wrapped in double quotes by HEEx.
     encoded =
       ops
       |> :erlang.term_to_binary()

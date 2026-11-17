@@ -11,13 +11,277 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
     write_code_avm!()
     write_system_avm!()
     write_process_avm!()
-    write_list_avm!()
+    write_list_avm!(Path.expand("avm_deps/elixir_list.avm"))
     write_enum_avm!()
+    write_enumerable_function_avm!(Path.expand("avm_deps/elixir_enumerable_function.avm"))
+    write_request_id_avm!(Path.expand("avm_deps/plug_request_id.avm"))
+    write_query_avm!(Path.expand("avm_deps/plug_conn_query.avm"))
+    write_conn_avm!(Path.expand("avm_deps/plug_conn.avm"))
+    write_static_avm!(Path.expand("avm_deps/plug_static.avm"))
     write_map_avm!()
+    write_access_avm!()
     write_erlang_application_avm!()
     write_elixir_stdlib_avm!()
     write_calendar_avm!()
     :ok
+  end
+
+  def write_enumerable_function_avm!(output) do
+    source = Path.expand("../../../atomvm/enumerable_function.ex", __DIR__)
+
+    build_dir =
+      Path.join(Mix.Project.build_path(), "uri_enumerable_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(build_dir)
+
+    try do
+      {message, status} =
+        System.cmd("elixirc", ["--ignore-module-conflict", "-o", build_dir, source],
+          stderr_to_stdout: true
+        )
+
+      if status != 0, do: Mix.raise(message)
+
+      beam = Path.join(build_dir, "Elixir.Enumerable.Function.beam")
+      ExAtomVM.PackBEAM.make_avm([{beam, :beam}], output)
+      :ok
+    after
+      File.rm_rf!(build_dir)
+    end
+  end
+
+  def write_request_id_avm!(output) do
+    source = Path.expand("../../../atomvm/plug_request_id.ex", __DIR__)
+
+    build_dir =
+      Path.join(Mix.Project.build_path(), "plug_request_id_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(build_dir)
+
+    try do
+      {message, status} =
+        System.cmd(
+          "elixirc",
+          [
+            "--ignore-module-conflict",
+            "-pa",
+            Path.join(Mix.Project.build_path(), "lib/plug/ebin"),
+            "-o",
+            build_dir,
+            source
+          ],
+          stderr_to_stdout: true
+        )
+
+      if status != 0, do: Mix.raise(message)
+
+      beam = Path.join(build_dir, "Elixir.Plug.RequestId.beam")
+      ExAtomVM.PackBEAM.make_avm([{beam, :beam}], output)
+      :ok
+    after
+      File.rm_rf!(build_dir)
+    end
+  end
+
+  def write_query_avm!(output) do
+    source_path = Path.join(Mix.Project.deps_path(), "plug/lib/plug/conn/query.ex")
+    source = File.read!(source_path)
+
+    for call <- ["URI.decode_www_form(", "URI.encode_www_form("] do
+      unless String.contains?(source, call), do: Mix.raise("missing #{call} in #{source_path}")
+    end
+
+    build_dir =
+      Path.join(Mix.Project.build_path(), "plug_conn_query_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(build_dir)
+
+    try do
+      patched_path = Path.join(build_dir, "query.ex")
+
+      source =
+        source
+        |> String.replace("URI.decode_www_form(", "AtomVM.URI.decode_www_form(")
+        |> String.replace("URI.encode_www_form(", "AtomVM.URI.encode_www_form(")
+
+      File.write!(patched_path, source)
+
+      {message, status} =
+        System.cmd(
+          "elixirc",
+          [
+            "--ignore-module-conflict",
+            "-pa",
+            Path.join(Mix.Project.build_path(), "lib/plug/ebin"),
+            "-o",
+            build_dir,
+            patched_path
+          ],
+          stderr_to_stdout: true
+        )
+
+      if status != 0, do: Mix.raise("Plug.Conn.Query compile failed:\n#{message}")
+
+      beam = Path.join(build_dir, "Elixir.Plug.Conn.Query.beam")
+      :ok = ExAtomVM.PackBEAM.make_avm([{beam, :beam}], output)
+    after
+      File.rm_rf!(build_dir)
+    end
+  end
+
+  def write_conn_avm!(output) do
+    source_path = Path.join(Mix.Project.deps_path(), "plug/lib/plug/conn.ex")
+    source = File.read!(source_path)
+    null_check = ~S[if file =~ "\0" do]
+
+    if length(:binary.matches(source, null_check)) != 1 do
+      Mix.raise("expected one #{null_check} in #{source_path}")
+    end
+
+    build_dir =
+      Path.join(Mix.Project.build_path(), "plug_conn_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(build_dir)
+
+    try do
+      patched_path = Path.join(build_dir, "conn.ex")
+
+      patched =
+        String.replace(
+          source,
+          null_check,
+          ~S[if :binary.match(file, <<0>>) != :nomatch do]
+        )
+
+      File.write!(patched_path, patched)
+
+      {message, status} =
+        System.cmd(
+          "elixirc",
+          [
+            "--ignore-module-conflict",
+            "-pa",
+            Path.join(Mix.Project.build_path(), "lib/plug/ebin"),
+            "-o",
+            build_dir,
+            patched_path
+          ],
+          stderr_to_stdout: true
+        )
+
+      if status != 0, do: Mix.raise("Plug.Conn compile failed:\n#{message}")
+
+      beam = Path.join(build_dir, "Elixir.Plug.Conn.beam")
+      :ok = ExAtomVM.PackBEAM.make_avm([{beam, :beam}], output)
+    after
+      File.rm_rf!(build_dir)
+    end
+  end
+
+  def write_static_avm!(output) do
+    source_path = Path.join(Mix.Project.deps_path(), "plug/lib/plug/static.ex")
+    source = File.read!(source_path)
+    call = "&URI.decode/1"
+
+    if length(:binary.matches(source, call)) != 2 do
+      Mix.raise("expected two #{call} calls in #{source_path}")
+    end
+
+    build_dir =
+      Path.join(Mix.Project.build_path(), "plug_static_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(build_dir)
+
+    try do
+      patched_path = Path.join(build_dir, "static.ex")
+
+      invalid_path_source = """
+        defp invalid_path?(list) do
+          invalid_path?(list, :binary.compile_pattern(["/", "\\\\", ":", "\\0"]))
+        end
+
+        defp invalid_path?([h | _], _match) when h in [".", "..", ""], do: true
+        defp invalid_path?([h | t], match), do: String.contains?(h, match) or invalid_path?(t)
+        defp invalid_path?([], _match), do: false
+      """
+
+      target_invalid_path = """
+        defp invalid_path?([h | _]) when h in [".", "..", ""], do: true
+        defp invalid_path?([h | t]),
+          do: :binary.match(h, ["/", "\\\\", ":", "\\0"]) != :nomatch or invalid_path?(t)
+        defp invalid_path?([]), do: false
+      """
+
+      file_info_source = """
+        defp regular_file_info(path) do
+          case :prim_file.read_file_info(path) do
+            {:ok, file_info(type: :regular) = file_info} ->
+              file_info
+
+            _ ->
+              nil
+          end
+        end
+      """
+
+      target_file_info = """
+        defp regular_file_info(path) do
+          case Phoenix.AtomVM.PrivFile.read(path) do
+            {:ok, body} -> file_info(type: :regular, size: byte_size(body))
+            :error -> nil
+          end
+        end
+      """
+
+      etag_source =
+        "file_info(size: size, mtime: mtime) = file_info\n        <<?\", {size, mtime} |> :erlang.phash2() |> Integer.to_string(16)::binary, ?\">>"
+
+      target_etag =
+        "{:ok, body} = Phoenix.AtomVM.PrivFile.read(path)\n        <<?\", :erlang.crc32(body) |> Integer.to_string(16)::binary, ?\">>"
+
+      if length(:binary.matches(source, invalid_path_source)) != 1 do
+        Mix.raise("expected invalid_path? definition in #{source_path}")
+      end
+
+      for anchor <- [file_info_source, etag_source] do
+        if length(:binary.matches(source, anchor)) != 1 do
+          Mix.raise("expected Plug.Static source anchor in #{source_path}: #{anchor}")
+        end
+      end
+
+      patched =
+        source
+        |> String.replace(call, "&AtomVM.URI.decode/1")
+        |> String.replace(invalid_path_source, target_invalid_path)
+        |> String.replace(file_info_source, target_file_info)
+        |> String.replace(etag_source, target_etag)
+
+      File.write!(patched_path, patched)
+
+      {message, status} =
+        System.cmd(
+          "elixirc",
+          [
+            "--ignore-module-conflict",
+            "-pa",
+            Path.join(Mix.Project.build_path(), "lib/plug/ebin"),
+            "-o",
+            build_dir,
+            patched_path
+          ],
+          stderr_to_stdout: true
+        )
+
+      if status != 0, do: Mix.raise("Plug.Static compile failed:\n#{message}")
+
+      beams =
+        Path.wildcard(Path.join(build_dir, "*.beam"))
+        |> Enum.map(&{&1, :beam})
+
+      :ok = ExAtomVM.PackBEAM.make_avm(beams, output)
+    after
+      File.rm_rf!(build_dir)
+    end
   end
 
   defp write_application_avm! do
@@ -306,14 +570,16 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
 
   # AtomVM List has no keystore/4 (Plug.Conn.put_resp_header needs it).
   # Read stock AtomVM List.ex (do not edit AtomVM) and pack a copy with keystore.
-  defp write_list_avm! do
-    out = Path.expand("avm_deps/elixir_list.avm")
+  def write_list_avm!(output) do
+    out = Path.expand(output)
     compile_path = Mix.Project.compile_path()
     beam_path = Path.join(System.tmp_dir!(), "Elixir.List.atomvm_stub.beam")
     stub_ex = Path.join(System.tmp_dir!(), "list_atomvm_stub.ex")
 
     list_src =
       [
+        Path.expand("../../../../AtomVM/libs/exavmlib/lib/List.ex", __DIR__),
+        Path.expand("../AtomVM/libs/exavmlib/lib/List.ex", File.cwd!()),
         Path.expand("../../AtomVM/libs/exavmlib/lib/List.ex", File.cwd!()),
         Path.expand("../../../AtomVM/libs/exavmlib/lib/List.ex", File.cwd!()),
         "/home/linsei/Work/ElixirChip/AtomVM/libs/exavmlib/lib/List.ex"
@@ -321,8 +587,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
       |> Enum.find(&File.exists?/1)
 
     unless list_src do
-      Mix.shell().error("AtomVM List.ex not found; skipping List.keystore stub")
-      :ok
+      Mix.raise("AtomVM List.ex not found; cannot build List.keystore stub")
     else
       source = File.read!(list_src)
 
@@ -346,8 +611,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
         )
 
       if patched == source do
-        Mix.shell().error("Failed to patch AtomVM List.ex for keystore; skipping")
-        :ok
+        Mix.raise("Failed to patch AtomVM List.ex for keystore")
       else
         File.write!(stub_ex, patched)
 
@@ -384,6 +648,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
 
     enum_src =
       [
+        Path.expand("../../../../AtomVM/libs/exavmlib/lib/Enum.ex", __DIR__),
         Path.expand("../../AtomVM/libs/exavmlib/lib/Enum.ex", File.cwd!()),
         Path.expand("../../../AtomVM/libs/exavmlib/lib/Enum.ex", File.cwd!()),
         "/home/linsei/Work/ElixirChip/AtomVM/libs/exavmlib/lib/Enum.ex"
@@ -535,6 +800,8 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
 
     map_src =
       [
+        Path.expand("../../../../AtomVM/libs/exavmlib/lib/Map.ex", __DIR__),
+        Path.expand("../AtomVM/libs/exavmlib/lib/Map.ex", File.cwd!()),
         Path.expand("../../AtomVM/libs/exavmlib/lib/Map.ex", File.cwd!()),
         Path.expand("../../../AtomVM/libs/exavmlib/lib/Map.ex", File.cwd!()),
         "/home/linsei/Work/ElixirChip/AtomVM/libs/exavmlib/lib/Map.ex"
@@ -542,12 +809,23 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
       |> Enum.find(&File.exists?/1)
 
     unless map_src do
-      Mix.shell().error("AtomVM Map.ex not found; skipping Map.update!/drop stub")
-      :ok
+      Mix.raise("AtomVM Map.ex not found; cannot build Map compatibility AVM")
     else
       source = File.read!(map_src)
 
       insert = """
+
+        @doc false
+        def get_and_update!(map, key, fun) when is_function(fun, 1) do
+          value = :maps.get(key, map)
+
+          case fun.(value) do
+            {get, update} -> {get, :maps.put(key, update, map)}
+            :pop -> {value, :maps.remove(key, map)}
+            other ->
+              raise "the given function must return a two-element tuple or :pop, got: \#{inspect(other)}"
+          end
+        end
 
         @doc false
         def update!(%{} = map, key, fun) when is_function(fun, 1) do
@@ -586,8 +864,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
         )
 
       if patched == source do
-        Mix.shell().error("Failed to patch AtomVM Map.ex for update!/drop; skipping")
-        :ok
+        Mix.raise("Failed to patch AtomVM Map.ex for compatibility AVM")
       else
         File.write!(stub_ex, patched)
 
@@ -606,8 +883,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
           )
 
         if status != 0 do
-          Mix.shell().error("Map stub compile failed:\n#{output}")
-          :ok
+          Mix.raise("Map stub compile failed:\n#{output}")
         else
           ExAtomVM.PackBEAM.make_avm([{beam_path, :beam}], out)
           File.cp!(beam_path, Path.join(compile_path, "Elixir.Map.beam"))
@@ -617,6 +893,90 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
           :ok
         end
       end
+    end
+  end
+
+  defp write_access_avm! do
+    source_path =
+      [
+        Path.expand("../../../../AtomVM/libs/exavmlib/lib/Access.ex", __DIR__),
+        Path.expand("../AtomVM/libs/exavmlib/lib/Access.ex", File.cwd!()),
+        Path.expand("../../AtomVM/libs/exavmlib/lib/Access.ex", File.cwd!()),
+        Path.expand("../../../AtomVM/libs/exavmlib/lib/Access.ex", File.cwd!()),
+        "/home/linsei/Work/ElixirChip/AtomVM/libs/exavmlib/lib/Access.ex"
+      ]
+      |> Enum.find(&File.exists?/1)
+
+    if is_nil(source_path), do: Mix.raise("AtomVM Access.ex not found")
+
+    insert = ~S"""
+
+      def get_and_update(%{} = map, key, fun) when is_function(fun, 1) do
+        value = case :maps.find(key, map) do
+          {:ok, found} -> found
+          :error -> nil
+        end
+
+        case fun.(value) do
+          {get, update} -> {get, :maps.put(key, update, map)}
+          :pop -> {value, :maps.remove(key, map)}
+          other -> raise "the given function must return a two-element tuple or :pop, got: #{inspect(other)}"
+        end
+      end
+
+      def get_and_update(list, key, fun) when is_list(list) and is_atom(key) and is_function(fun, 1) do
+        case :lists.keyfind(key, 1, list) do
+          {_, value} ->
+            case fun.(value) do
+              {get, update} -> {get, :lists.keyreplace(key, 1, list, {key, update})}
+              :pop -> {value, :lists.keydelete(key, 1, list)}
+              other -> raise "the given function must return a two-element tuple or :pop, got: #{inspect(other)}"
+            end
+
+          false ->
+            case fun.(nil) do
+              {get, update} -> {get, [{key, update} | list]}
+              :pop -> {nil, list}
+              other -> raise "the given function must return a two-element tuple or :pop, got: #{inspect(other)}"
+            end
+        end
+      end
+
+      def get_and_update(nil, key, _fun) do
+        raise ArgumentError, "could not put/update key #{inspect(key)} on a nil value"
+      end
+
+      def get_and_update(list, key, _fun) when is_list(list) do
+        raise ArgumentError, "the Access calls for keywords expect the key to be an atom, got: " <> inspect(key)
+      end
+    """
+
+    source = File.read!(source_path)
+    patched = String.replace(source, "\nend\n", insert <> "\nend\n", global: false)
+    if patched == source, do: Mix.raise("Failed to patch AtomVM Access.ex")
+
+    build_dir =
+      Path.join(Mix.Project.build_path(), "atomvm_access_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(build_dir)
+
+    try do
+      patched_path = Path.join(build_dir, "access.ex")
+      File.write!(patched_path, patched)
+
+      {message, status} =
+        System.cmd("elixirc", ["--ignore-module-conflict", "-o", build_dir, patched_path],
+          stderr_to_stdout: true
+        )
+
+      if status != 0, do: Mix.raise(message)
+
+      beam = Path.join(build_dir, "Elixir.Access.beam")
+      ExAtomVM.PackBEAM.make_avm([{beam, :beam}], "avm_deps/elixir_access.avm")
+      File.cp!(beam, Path.join(Mix.Project.compile_path(), "Elixir.Access.beam"))
+      :ok
+    after
+      File.rm_rf!(build_dir)
     end
   end
 
@@ -653,7 +1013,7 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
   # Connection/Logger paths may need Kernel.Utils; AtomVM ships none.
   # Host Elixir.String is large and may use opcodes AtomVM rejects — ship a stub.
   # Do not compile or patch AtomVM/exavmlib sources here.
-  defp write_elixir_stdlib_avm! do
+  def write_elixir_stdlib_avm! do
     out = Path.expand("avm_deps/elixir_stdlib_extras.avm")
     elixir_ebin = Path.join(:code.lib_dir(:elixir), "ebin")
     compile_path = Mix.Project.compile_path()
@@ -672,6 +1032,13 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
       def to_charlist(bin) when is_binary(bin), do: :erlang.binary_to_list(bin)
       def to_integer(bin) when is_binary(bin), do: :erlang.binary_to_integer(bin)
       def to_atom(bin) when is_binary(bin), do: :erlang.binary_to_atom(bin, :utf8)
+
+      def upcase(bin, :ascii) when is_binary(bin), do: upcase_ascii(bin, [])
+
+      defp upcase_ascii(<<>>, acc), do: :erlang.iolist_to_binary(:lists.reverse(acc))
+      defp upcase_ascii(<<char, rest::binary>>, acc) when char in ?a..?z,
+        do: upcase_ascii(rest, [<<char - 32>> | acc])
+      defp upcase_ascii(<<char, rest::binary>>, acc), do: upcase_ascii(rest, [<<char>> | acc])
 
       def contains?(subject, pattern)
           when is_binary(subject) and is_binary(pattern) do
@@ -763,15 +1130,197 @@ defmodule Mix.Tasks.Phoenix.Atomvm.CompatBeams do
     compile_stub!(string_ex, string_beam, String)
     File.cp!(string_beam, Path.join(compile_path, "Elixir.String.beam"))
 
+    path_beam = Path.join(System.tmp_dir!(), "Elixir.Path.atomvm_stub.beam")
+    path_ex = Path.join(System.tmp_dir!(), "path_atomvm_stub.ex")
+    File.write!(path_ex, path_stub_source())
+    compile_stub!(path_ex, path_beam, Path)
+    File.cp!(path_beam, Path.join(compile_path, "Elixir.Path.beam"))
+
     ExAtomVM.PackBEAM.make_avm(
-      [{utils, :beam}, {string_beam, :beam}],
+      [{utils, :beam}, {string_beam, :beam}, {path_beam, :beam}],
       out
     )
 
     Mix.shell().info("Wrote AtomVM Elixir stdlib extras -> #{out} (and app ebin)")
     File.rm(string_beam)
     File.rm(string_ex)
+    File.rm(path_beam)
+    File.rm(path_ex)
     :ok
+  end
+
+  def path_stub_source do
+    ~S'''
+    defmodule Path do
+      @moduledoc false
+      @compile {:autoload, false}
+
+      def join(paths) when is_list(paths) do
+        case paths do
+          [name1, name2 | rest] -> join([join(name1, name2) | rest])
+          [name] -> name
+        end
+      end
+
+      def join(left, right) do
+        left
+        |> do_join(right)
+        |> remove_dir_sep()
+      end
+
+      defp do_join(left, "/"), do: remove_dir_sep(left)
+      defp do_join("", right), do: relative(right)
+      defp do_join("/", right), do: "/" <> relative(right)
+
+      defp do_join(left, right), do: remove_dir_sep(left) <> "/" <> relative(right)
+
+      defp relative("/"), do: "."
+      defp relative("/" <> rest), do: rest
+      defp relative(other), do: other
+
+      defp remove_dir_sep(""), do: ""
+      defp remove_dir_sep("/"), do: "/"
+
+      defp remove_dir_sep(bin) do
+        size = byte_size(bin)
+
+        if :binary.at(bin, size - 1) == ?/ do
+          binary_part(bin, 0, size - 1)
+        else
+          bin
+        end
+      end
+
+      def split(path) do
+        case :binary.split(path, "/", [:global]) do
+          ["" | rest] when rest != [] -> ["/" | reject_empty(rest)]
+          other -> reject_empty(other)
+        end
+      end
+
+      defp reject_empty(list), do: reject_loop(list, [])
+
+      defp reject_loop([], acc), do: :lists.reverse(acc)
+      defp reject_loop(["" | tail], acc), do: reject_loop(tail, acc)
+      defp reject_loop([head | tail], acc), do: reject_loop(tail, [head | acc])
+
+      def dirname(path) do
+        parts = dirname_parts(:binary.split(path, "/", [:global]))
+        dirjoin(parts, if(parts == [], do: ".", else: ""))
+      end
+
+      defp dirname_parts([]), do: []
+
+      defp dirname_parts(parts) do
+        case :lists.reverse(parts) do
+          [] -> []
+          [_ | tail] -> :lists.reverse(fstrip(tail))
+        end
+      end
+
+      defp fstrip(["" | [_ | _] = tail]), do: fstrip(tail)
+      defp fstrip(list), do: list
+
+      defp dirjoin(["" | tail], acc), do: dirjoin1(tail, acc <> "/")
+      defp dirjoin(parts, acc), do: dirjoin1(parts, acc)
+
+      defp dirjoin1([], acc), do: acc
+      defp dirjoin1([one], acc), do: acc <> one
+      defp dirjoin1([head | tail], acc), do: dirjoin(tail, acc <> head <> "/")
+
+      def basename(name), do: last_non_empty(:binary.split(name, "/", [:global]), "")
+
+      defp last_non_empty([], acc), do: acc
+      defp last_non_empty(["" | tail], acc), do: last_non_empty(tail, acc)
+      defp last_non_empty([head | tail], _acc), do: last_non_empty(tail, head)
+
+      def basename(name, ext) do
+        bname = basename(name)
+        le = byte_size(ext)
+        pos = byte_size(bname) - le
+
+        if pos < 0 do
+          bname
+        else
+          start = byte_size(name) - pos - le
+          slice = binary_part(name, start, pos + le)
+
+          if binary_part(slice, pos, le) == ext do
+            binary_part(slice, 0, pos)
+          else
+            bname
+          end
+        end
+      end
+
+      def rootname(path), do: rootname_scan(path, "", "")
+
+      defp rootname_scan(<<>>, root, _ext), do: reverse_bin(root)
+
+      defp rootname_scan(<<?/, rest::binary>>, root, ext),
+        do: rootname_scan(rest, "/" <> ext <> root, "")
+
+      defp rootname_scan(<<?., rest::binary>>, "/" <> _ = root, ""),
+        do: rootname_scan(rest, "." <> root, "")
+
+      defp rootname_scan(<<?., rest::binary>>, root, ext),
+        do: rootname_scan(rest, ext <> root, ".")
+
+      defp rootname_scan(<<char, rest::binary>>, root, "") when char != ?/ and char != ?.,
+        do: rootname_scan(rest, <<char>> <> root, "")
+
+      defp rootname_scan(<<char, rest::binary>>, root, ext) when char != ?/ and char != ?.,
+        do: rootname_scan(rest, root, <<char>> <> ext)
+
+      def rootname(path, ext), do: rootname_strip(path, ext, "")
+
+      defp rootname_strip(first, ext, result) when first == ext do
+        case result do
+          "/" <> _ -> reverse_bin(result) <> ext
+          _ -> reverse_bin(result)
+        end
+      end
+
+      defp rootname_strip(<<>>, _ext, result), do: reverse_bin(result)
+
+      defp rootname_strip(<<char, rest::binary>>, ext, result),
+        do: rootname_strip(rest, ext, <<char>> <> result)
+
+      def extname(name) do
+        pos = last_dot(name, 0, -1)
+
+        cond do
+          pos < 0 ->
+            ""
+
+          pos == 0 ->
+            ""
+
+          true ->
+            part = binary_part(name, pos - 1, byte_size(name) - pos + 1)
+
+            if :binary.match(part, "/") == :nomatch do
+              binary_part(name, pos, byte_size(name) - pos)
+            else
+              ""
+            end
+        end
+      end
+
+      defp last_dot(bin, index, best) do
+        if index >= byte_size(bin) do
+          best
+        else
+          best = if :binary.at(bin, index) == ?., do: index, else: best
+          last_dot(bin, index + 1, best)
+        end
+      end
+
+      defp reverse_bin(bin), do: reverse_loop(bin, "")
+      defp reverse_loop(<<>>, acc), do: acc
+      defp reverse_loop(<<char, rest::binary>>, acc), do: reverse_loop(rest, <<char>> <> acc)
+    end
+    '''
   end
 
   # Posts timestamps need NaiveDateTime/DateTime; AtomVM ships neither.
