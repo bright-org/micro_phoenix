@@ -9,6 +9,7 @@
   "exatomvm": {:git, "https://github.com/atomvm/ExAtomVM/", "4e615cd46d1568337a2a21c56ea79776fef85612", []},
   "expo": {:hex, :expo, "1.1.1", "4202e1d2ca6e2b3b63e02f69cfe0a404f77702b041d02b58597c00992b601db5", [:mix], [], "hexpm", "5fb308b9cb359ae200b7e23d37c76978673aa1b06e2b3075d814ce12c5811640"},
   "exqlite": {:hex, :exqlite, "0.35.0", "90741471945db42b66cd8ca3149af317f00c22c769cc6b06e8b0a08c5924aae5", [:make, :mix], [{:cc_precompiler, "~> 0.1", [hex: :cc_precompiler, repo: "hexpm", optional: false]}, {:db_connection, "~> 2.1", [hex: :db_connection, repo: "hexpm", optional: false]}, {:elixir_make, "~> 0.8", [hex: :elixir_make, repo: "hexpm", optional: false]}, {:table, "~> 0.1.0", [hex: :table, repo: "hexpm", optional: true]}], "hexpm", "a009e303767a28443e546ac8aab2539429f605e9acdc38bd43f3b13f1568bca9"},
+  "gettext": {:git, "https://github.com/bright-org/gettext.git", "17209d126b807cdc94002f6ecf9044ebb73daa78", [branch: "main"]},
   "jason": {:hex, :jason, "1.4.5", "2e3a008590b0b8d7388c20293e9dcc9cf3e5d642fd2a114e4cbbb52e595d940a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0 or ~> 3.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "b0c823996102bcd0239b3c2444eb00409b72f6a140c1950bc8b457d836b30684"},
   "micro_scaffold_example": {:git, "git@github.com:bright-org/micro_scaffold_example.git", "d074ad8fa8589c800f4f364223dbe4a59a5c8728", []},
   "mime": {:hex, :mime, "2.0.7", "b8d739037be7cd402aee1ba0306edfdef982687ee7e9859bee6198c1e7e2f128", [:mix], [], "hexpm", "6171188e399ee16023ffc5b76ce445eb6d9672e2e241d2df6050f3c771e80ccd"},
